@@ -151,3 +151,11 @@ def test_malformed_overrides_ignored(store):
     overrides_path(store).write_text("{not json")
     plan = build_plan(store)
     assert len(plan["rooms"]) == 1 and "overrides" in plan["warnings"]
+
+
+def test_overrides_replace_objects(store):
+    record(store, theta=0, tx=0, ty=0, t0=100)
+    from wsn.plan import overrides_path
+    overrides_path(store).write_text(json.dumps({"objects": [{"type": "диван", "xy": [1, 2], "size": [2, 0.9, 0.8], "rot": 0.5}]}))
+    (obj,) = build_plan(store)["objects"]
+    assert obj["type"] == "диван" and obj["xy"] == [1.0, 2.0] and obj["rot"] == 0.5

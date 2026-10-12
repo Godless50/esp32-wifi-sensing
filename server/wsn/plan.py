@@ -111,11 +111,16 @@ def build_plan(store: Store) -> dict:
     ov_path = overrides_path(store)
     if ov_path.exists():
         try:
-            for name, poly in json.loads(ov_path.read_text(encoding="utf-8")).get("rooms", {}).items():
+            ov = json.loads(ov_path.read_text(encoding="utf-8"))
+            for name, poly in ov.get("rooms", {}).items():
                 pts = [(float(x), float(y)) for x, y in poly]
                 if polygon_valid(pts) is None:
                     rooms[name] = [[round(x, 3), round(y, 3)] for x, y in pts]
                     edited.add(name)
+            if isinstance(ov.get("objects"), list):  # ручной список предметов заменяет отмеченные в обходах
+                objects = [{"type": str(o["type"]), "xy": [float(o["xy"][0]), float(o["xy"][1])],
+                            "size": [float(v) for v in o.get("size", [0.5, 0.5, 0.8])][:3],
+                            "rot": float(o.get("rot", 0.0)), "session": "edited"} for o in ov["objects"]]
         except (ValueError, TypeError, AttributeError):
             warnings["overrides"] = "plan_overrides.json is malformed; ignored"
     return {
