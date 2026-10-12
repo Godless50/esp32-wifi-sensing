@@ -114,6 +114,27 @@ def test_empty_session_with_duration(proto):
     assert s.kind == "empty" and s.duration_s == 300
 
 
+def test_bad_room_and_router_rejected_live(tmp_path):
+    from wsn.plan import RoomTracker
+
+    store = Store(tmp_path / "wsn.db", tmp_path / "sessions")
+    tracker = RoomTracker()
+    p = CaptureProtocol(store, Recorder(store), default_device=lambda: DEV, clock=Clock(), validate_event=tracker.check)
+    synced(p, "A")
+    p.on_message("A", ev(1, "session_start", session_kind="walk"))
+    p.on_message("A", ev(2, "origin", p=[0, 1.4, 0]))
+    assert errors(p.on_message("A", ev(3, "router", p=[0.1, 1.4, 0]))) == ["bad_router"]
+    p.on_message("A", ev(4, "room_new", name="Зал"))
+    p.on_message("A", ev(5, "corner", p=[0, 0, 0]))
+    p.on_message("A", ev(6, "corner", p=[1, 0, 0]))
+    out = p.on_message("A", ev(7, "room_close"))
+    assert errors(out) == ["bad_polygon"] and {"type": "ack", "pose_seq": 0, "event_seq": 7} in out
+    sid = store.active().id
+    p.on_message("A", ev(8, "session_stop"))
+    kinds = [json.loads(x)["kind"] for x in (store.session_dir(sid) / "events.jsonl").read_text().splitlines()]
+    assert "router" not in kinds and "room_close" not in kinds  # отклонённые не пишутся
+
+
 def test_ws_endpoint(tmp_path):
     store = Store(tmp_path / "wsn.db", tmp_path / "sessions")
     ks = KeyStore(tmp_path / "k.json")

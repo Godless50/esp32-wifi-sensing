@@ -19,6 +19,7 @@ from typing import Callable
 from .capture import CaptureProtocol
 from .ingest import IngestService
 from .live import LiveHub
+from .plan import RoomTracker, build_plan
 from .recorder import Recorder
 from .store import SessionBusy, SessionNotFound, Store
 
@@ -43,7 +44,7 @@ def create_app(
 ) -> FastAPI:
     ui_dir = Path(ui_dir)
     capture = (
-        CaptureProtocol(store, recorder, default_device or (lambda: None))
+        CaptureProtocol(store, recorder, default_device or (lambda: None), validate_event=RoomTracker().check)
         if store is not None and recorder is not None
         else None
     )
@@ -119,6 +120,10 @@ def create_app(
         except SessionNotFound as e:
             raise HTTPException(404, "no such session") from e
         return {"deleted": sid}
+
+    @app.get("/api/plan")
+    def api_plan() -> dict:
+        return build_plan(_store())
 
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket) -> None:

@@ -40,13 +40,13 @@ class CaptureProtocol:
         recorder: Recorder,
         default_device: Callable[[], str | None],
         clock: Callable[[], float] = time.monotonic,
-        validate_event: Callable[[str, dict], str | None] | None = None,
+        validate_event: Callable[[str, dict], tuple[str, str] | None] | None = None,
     ):
         self.store = store
         self.recorder = recorder
         self.default_device = default_device
         self.now = clock
-        self.validate_event = validate_event  # returns error text to reject (e.g. bad polygon), else None
+        self.validate_event = validate_event  # returns (code, message) to reject the event, else None
         self.clients: dict[str, _Client] = {}
         self.owner: str | None = None
 
@@ -137,6 +137,8 @@ class CaptureProtocol:
                 except (SessionBusy, ValueError) as e:
                     return [_err("bad_session", str(e))]
                 self.owner = cid
+                if self.validate_event is not None:
+                    self.validate_event(ev_kind, rec)  # сброс состояния проверки на новую сессию
             self.store.append_event(rec)
         elif not self._owns(cid):
             return [_err("no_session" if self.store.active() is None else "not_owner")]
@@ -145,7 +147,7 @@ class CaptureProtocol:
                 problem = self.validate_event(ev_kind, rec)
                 if problem:
                     c.event_seq = seq  # отклонённое событие не надо пересылать
-                    return [_err("bad_" + ev_kind, problem), self._ack(c)]
+                    return [_err(*problem), self._ack(c)]
             self.store.append_event(rec)
             if ev_kind == "session_stop":
                 s = self.store.active()
