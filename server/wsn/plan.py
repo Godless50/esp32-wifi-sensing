@@ -31,6 +31,10 @@ def _last(events: list[dict], kind: str) -> dict | None:
     return None
 
 
+def overrides_path(store: Store) -> Path:
+    return store.sessions_dir.parent / "plan_overrides.json"
+
+
 def build_plan(store: Store) -> dict:
     rooms: dict[str, list] = {}
     objects: list[dict] = []
@@ -102,8 +106,20 @@ def build_plan(store: Store) -> dict:
             last_t = p["t"]
         trajectories[s.id] = traj
         store.set_plan_status(s.id, True, warn)
+    # ручные правки плана (по словам пользователя) имеют приоритет над обходами
+    edited = set()
+    ov_path = overrides_path(store)
+    if ov_path.exists():
+        try:
+            for name, poly in json.loads(ov_path.read_text(encoding="utf-8")).get("rooms", {}).items():
+                pts = [(float(x), float(y)) for x, y in poly]
+                if polygon_valid(pts) is None:
+                    rooms[name] = [[round(x, 3), round(y, 3)] for x, y in pts]
+                    edited.add(name)
+        except (ValueError, TypeError, AttributeError):
+            warnings["overrides"] = "plan_overrides.json is malformed; ignored"
     return {
-        "rooms": [{"name": n, "polygon": poly} for n, poly in rooms.items()],
+        "rooms": [{"name": n, "polygon": poly, "edited": n in edited} for n, poly in rooms.items()],
         "objects": objects,
         "board": [0.0, 0.0],
         "router": router_xy,

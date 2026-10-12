@@ -1,3 +1,4 @@
+import json
 import math
 
 import pytest
@@ -132,3 +133,21 @@ def test_router_before_board_accepted():
     assert rt.check("router", {"p": [0, 1.4, -3]}) is None  # обход начат не от платы
     assert rt.check("origin", {"p": [0.1, 1.4, -3.1]})[0] == "bad_origin"
     assert rt.check("origin", {"p": [-8, 1.4, 0]}) is None
+
+
+def test_overrides_replace_room_polygon(store):
+    record(store, theta=0, tx=0, ty=0, t0=100)
+    from wsn.plan import overrides_path
+    overrides_path(store).write_text(json.dumps({"rooms": {"Кухня": [[0, 0], [3, 0], [3, 2], [0, 2]],
+                                                           "Кладовка": [[0, 0], [1, 1], [1, 0], [0, 1]]}}))
+    rooms = {r["name"]: r for r in build_plan(store)["rooms"]}
+    assert rooms["Кухня"]["polygon"] == [[0, 0], [3, 0], [3, 2], [0, 2]] and rooms["Кухня"]["edited"]
+    assert "Кладовка" not in rooms  # самопересекающаяся правка не применяется
+
+
+def test_malformed_overrides_ignored(store):
+    record(store, theta=0, tx=0, ty=0, t0=100)
+    from wsn.plan import overrides_path
+    overrides_path(store).write_text("{not json")
+    plan = build_plan(store)
+    assert len(plan["rooms"]) == 1 and "overrides" in plan["warnings"]
