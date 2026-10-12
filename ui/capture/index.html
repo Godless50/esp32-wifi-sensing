@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Съёмка квартиры — capture</title>
+<style>
+  :root { --bg:#0f1216; --panel:rgba(16,19,24,.82); --line:rgba(255,255,255,.14); --text:#eef1f5; --muted:#9aa3b0;
+          --ok:#3fb68b; --warn:#e0a43a; --bad:#e0564f; --accent:#3b82f6; --rec:#e0564f; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font:15px/1.35 system-ui,sans-serif; }
+  #intro { padding:20px 16px; max-width:560px; margin:0 auto; }
+  #intro h1 { font-size:20px; margin:0 0 8px; }
+  #intro p { color:var(--muted); margin:6px 0; }
+  .big { width:100%; padding:16px; font-size:18px; border:0; border-radius:12px; background:var(--accent); color:#fff; margin-top:14px; }
+  .big:disabled { background:#4a5260; }
+  #ui { position:fixed; inset:0; display:none; pointer-events:none; }
+  #ui.on { display:block; }
+  #ui > * { pointer-events:auto; }
+  #status { position:absolute; top:0; left:0; right:0; padding:10px 12px calc(10px) 12px; padding-top:max(10px, env(safe-area-inset-top));
+            background:var(--panel); display:flex; flex-wrap:wrap; gap:6px 14px; font-variant-numeric:tabular-nums; font-size:14px; }
+  #status b { font-weight:600; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--muted); margin-right:5px; vertical-align:1px; }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); } .dot.rec { background:var(--rec); animation:blink 1s infinite; }
+  @keyframes blink { 50% { opacity:.3; } }
+  #cross { position:absolute; left:50%; top:45%; width:44px; height:44px; margin:-22px 0 0 -22px; pointer-events:none;
+           border:2px solid rgba(255,255,255,.85); border-radius:50%; box-shadow:0 0 0 1px rgba(0,0,0,.4); }
+  #cross::after { content:""; position:absolute; left:50%; top:50%; width:6px; height:6px; margin:-3px 0 0 -3px; border-radius:50%; background:#fff; }
+  #cross.nohit { border-style:dashed; border-color:var(--warn); }
+  #log { position:absolute; left:12px; right:12px; top:84px; font-size:14px; }
+  #log div { background:var(--panel); padding:6px 10px; border-radius:8px; margin-bottom:6px; }
+  #log .err { color:#ffb4ae; } #log .ok { color:#a5e9cd; }
+  #panel { position:absolute; left:0; right:0; bottom:0; padding:10px 10px max(10px, env(safe-area-inset-bottom)); background:var(--panel); }
+  .row { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; margin-bottom:8px; }
+  .row.three { grid-template-columns:repeat(3, 1fr); }
+  .row.two { grid-template-columns:1fr 1fr; }
+  #panel button, #panel select, #panel input { min-height:48px; border-radius:10px; border:1px solid var(--line); background:rgba(255,255,255,.08);
+           color:var(--text); font-size:15px; padding:6px; }
+  #panel button.primary { background:var(--accent); border-color:transparent; }
+  #panel button.danger { background:var(--rec); border-color:transparent; }
+  #panel button.sel { outline:2px solid var(--ok); }
+  #panel button:disabled { opacity:.35; }
+  #panel input { width:100%; }
+  .hint { color:var(--muted); font-size:13px; margin:2px 2px 8px; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<div id="intro">
+  <h1>Съёмка квартиры</h1>
+  <p>Пройдите по квартире с телефоном. Сервер одновременно запишет сигнал платы и положение телефона.</p>
+  <p>Порядок: «Запись» → встаньте у платы → «Я у платы» → подойдите к роутеру → «Я у роутера» → для каждой комнаты «Новая комната» и «Угол» в каждом углу на полу → «Закрыть комнату».</p>
+  <p id="support">Проверяю поддержку AR…</p>
+  <p>Связь с сервером: <span id="conn0">…</span></p>
+  <button id="enter" class="big" disabled>Включить камеру и AR</button>
+</div>
+
+<div id="ui">
+  <div id="status">
+    <span><span id="dotConn" class="dot"></span><span id="conn">нет связи</span></span>
+    <span><span id="dotRec" class="dot"></span><b id="rec">не пишем</b> <span id="dur"></span></span>
+    <span>CSI <b id="hz">—</b> Гц</span>
+    <span>в очереди <b id="queue">0</b></span>
+    <span id="room"></span>
+  </div>
+  <div id="cross"></div>
+  <div id="log"></div>
+  <div id="panel">
+    <div class="row" id="rowSession">
+      <button id="bWalk" class="primary">Запись</button>
+      <select id="emptyDur" aria-label="Длительность пустой комнаты">
+        <option value="300">5 мин</option><option value="600" selected>10 мин</option>
+        <option value="1200">20 мин</option><option value="1800">30 мин</option>
+      </select>
+      <button id="bEmpty">Пусто</button>
+      <button id="bStop" class="danger" disabled>Стоп</button>
+    </div>
+    <div class="row two">
+      <button id="bOrigin" data-needrec>Я у платы</button>
+      <button id="bRouter" data-needrec>Я у роутера</button>
+    </div>
+    <div class="row three">
+      <input id="roomName" placeholder="Имя комнаты" maxlength="40" data-needrec>
+      <button id="bRoom" data-needrec>Новая комната</button>
+      <button id="bClose" data-needrec>Закрыть комнату</button>
+    </div>
+    <div class="row three">
+      <button id="bCorner" data-needrec>Угол</button>
+      <select id="objType" data-needrec aria-label="Тип предмета">
+        <option>стол</option><option>диван</option><option>кровать</option><option>шкаф</option>
+        <option>дверь</option><option>другое</option>
+      </select>
+      <button id="bObject" data-needrec>Предмет</button>
+    </div>
+    <div class="row" id="rowPose">
+      <button data-pose="stand" data-needrec>Стою</button>
+      <button data-pose="sit" data-needrec>Сижу</button>
+      <button data-pose="lie" data-needrec>Лежу</button>
+      <button data-pose="walk" data-needrec class="sel">Иду</button>
+    </div>
+    <div class="hint" id="hint">Наведите кружок на пол в углу комнаты, затем «Угол». Пунктир — пол не найден, угол возьмётся по положению телефона.</div>
+  </div>
+</div>
+<script src="/static/capture/capture.js"></script>
+</body>
+</html>

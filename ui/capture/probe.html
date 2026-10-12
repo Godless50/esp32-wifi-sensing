@@ -5,95 +5,125 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Проба WebXR</title>
 <style>
-  :root { --bg:#0f1216; --panel:#171b21; --line:#262c35; --text:#e6e9ee; --muted:#8a93a1; --ok:#3fb68b; --bad:#e0564f; }
-  @media (prefers-color-scheme: light) { :root { --bg:#f5f6f8; --panel:#fff; --line:#dde1e7; --text:#1b1f24; --muted:#5f6873; } }
-  * { box-sizing: border-box; }
+  :root { --bg:#0f1216; --line:#262c35; --text:#e6e9ee; --muted:#8a93a1; --ok:#3fb68b; --bad:#e0564f; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f5f6f8; --line:#dde1e7; --text:#1b1f24; --muted:#5f6873; } }
+  * { box-sizing:border-box; }
   body { margin:0; padding:16px; background:var(--bg); color:var(--text); font:16px/1.45 system-ui,sans-serif; }
   h1 { font-size:18px; margin:0 0 12px; }
   table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
   td { padding:6px 0; border-bottom:1px solid var(--line); vertical-align:top; }
-  td:first-child { color:var(--muted); width:45%; }
+  td:first-child { color:var(--muted); width:42%; }
   .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; }
-  button { width:100%; margin-top:16px; padding:16px; font-size:18px; border-radius:10px; border:0; background:#2f6fde; color:#fff; }
+  button { width:100%; margin-top:12px; padding:14px; font-size:17px; border-radius:10px; border:0; background:#2f6fde; color:#fff; text-align:left; }
+  button small { display:block; opacity:.8; font-size:13px; }
   button:disabled { background:#555; }
-  #overlay { position:fixed; inset:auto 0 0 0; padding:12px 16px; background:rgba(0,0,0,.6); color:#fff; font:15px/1.4 ui-monospace,monospace; }
-  #overlay button { margin-top:8px; padding:12px; }
+  #result { margin-top:16px; padding:12px; border:1px solid var(--line); border-radius:10px; font:14px/1.5 ui-monospace,monospace; white-space:pre-wrap; }
+  #overlay { background:transparent; }
+  #box { position:fixed; left:0; right:0; bottom:0; padding:12px 16px; background:rgba(0,0,0,.55); color:#fff; font:14px/1.45 ui-monospace,monospace; }
+  a { color:#6aa8ff; }
 </style>
 </head>
 <body>
-<h1>Проба WebXR для съёмки квартиры</h1>
+<h1>Проба WebXR (v4)</h1>
 <table>
-  <tr><td>Безопасный контекст (HTTPS)</td><td id="secure">…</td></tr>
-  <tr><td>navigator.xr</td><td id="xr">…</td></tr>
+  <tr><td>HTTPS</td><td id="secure">…</td></tr>
   <tr><td>immersive-ar</td><td id="ar">…</td></tr>
   <tr><td>Браузер</td><td id="ua"></td></tr>
 </table>
-<button id="start" disabled>Старт AR-сессии</button>
-<div id="overlay" hidden>
-  <div id="pose">поза: —</div>
-  <div id="hit">пол: —</div>
-  <div id="fps">кадров/с: —</div>
-  <button id="stop">Стоп</button>
-</div>
+<p>Каждый тест длится 15 секунд и закрывается сам (или кнопкой «Назад»). Медленно водите телефоном по полу.
+Потом здесь появится результат.</p>
+<button data-test="A" disabled>Тест A — как эталон<small>local, без hit-test, без оверлея</small></button>
+<button data-test="B" disabled>Тест B — A + оверлей<small>local, без hit-test, с dom-overlay</small></button>
+<button data-test="C" disabled>Тест C — как в съёмке<small>local-floor, hit-test, dom-overlay</small></button>
+<button data-test="D" disabled>Тест D — глубина<small>depth-sensing</small></button>
+<button data-test="E" disabled>Тест E — доступ к камере<small>camera-access</small></button>
+<button data-test="F" disabled>Тест F — освещение<small>light-estimation</small></button>
+<button data-test="G" disabled>Тест G — плоскости<small>plane-detection</small></button>
+<button data-test="H" disabled>Тест H — hit-test + якоря<small>hit-test, anchors</small></button>
+<p>Эталон от разработчиков стандарта: <a href="https://immersive-web.github.io/webxr-samples/immersive-ar-session.html">immersive-ar-session</a>
+(если там тоже чёрный экран — дело в телефоне, а не в этой странице).</p>
+<div id="result">результатов пока нет</div>
+<div id="overlay" hidden><div id="box">тест идёт…</div></div>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
 const mark = (id, ok, text) => { $(id).textContent = text; $(id).className = ok ? "ok" : "bad"; };
 $("ua").textContent = navigator.userAgent;
-mark("secure", window.isSecureContext, window.isSecureContext ? "да" : "нет — установите сертификат /ca.crt");
-let session = null;
+mark("secure", window.isSecureContext, window.isSecureContext ? "да" : "нет");
+const TESTS = {
+  A: { space: "local", init: {} },
+  B: { space: "local", init: { optionalFeatures: ["dom-overlay"], domOverlay: { root: null } } },
+  C: { space: "local-floor", init: { requiredFeatures: ["local-floor"], optionalFeatures: ["hit-test", "dom-overlay"],
+                                     domOverlay: { root: null } } },
+  // Варианты D–H меняют набор функций → Chrome иначе настраивает камеру в ARCore (обход отказа драйвера Honor)
+  D: { space: "local", init: { optionalFeatures: ["depth-sensing"],
+       depthSensing: { usagePreference: ["cpu-optimized"], dataFormatPreference: ["luminance-alpha"] } } },
+  E: { space: "local", init: { optionalFeatures: ["camera-access"] } },
+  F: { space: "local", init: { optionalFeatures: ["light-estimation"] } },
+  G: { space: "local", init: { optionalFeatures: ["plane-detection"] } },
+  H: { space: "local", init: { requiredFeatures: ["hit-test"], optionalFeatures: ["anchors"] } },
+};
+const results = {};
 
-async function probe() {
-  if (!navigator.xr) { mark("xr", false, "нет"); mark("ar", false, "—"); return; }
-  mark("xr", true, "есть");
-  try {
-    const ok = await navigator.xr.isSessionSupported("immersive-ar");
-    mark("ar", ok, ok ? "поддерживается" : "не поддерживается");
-    $("start").disabled = !ok;
-  } catch (e) { mark("ar", false, "ошибка: " + e.message); }
+function report() {
+  $("result").textContent = Object.entries(results).map(([k, r]) => `Тест ${k}: ${r}`).join("\n") || "результатов пока нет";
 }
 
-async function start() {
+async function run(name) {
+  const cfg = TESTS[name];
+  const init = JSON.parse(JSON.stringify(cfg.init));
+  if (init.domOverlay) init.domOverlay.root = $("overlay");
+  const st = { frames: 0, poses: 0, emulated: 0, firstPoseMs: null, hits: 0, overlay: "—", err: "" };
+  let session;
+  try { session = await navigator.xr.requestSession("immersive-ar", init); }
+  catch (e) { results[name] = "не запустилась: " + e.message; report(); return; }
+  const t0 = performance.now();
+  if (init.domOverlay) { $("overlay").hidden = false; st.overlay = session.domOverlayState ? session.domOverlayState.type : "не дан"; }
   try {
-    session = await navigator.xr.requestSession("immersive-ar", {
-      requiredFeatures: ["local-floor", "hit-test"],
-      optionalFeatures: ["dom-overlay"],
-      domOverlay: { root: $("overlay") },
-    });
-  } catch (e) { alertLine("не удалось запустить: " + e.message); return; }
-  $("overlay").hidden = false;
-  const canvas = document.createElement("canvas");
-  const gl = canvas.getContext("webgl", { xrCompatible: true });
-  session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
-  const floor = await session.requestReferenceSpace("local-floor");
-  const viewer = await session.requestReferenceSpace("viewer");
-  const hitSource = await session.requestHitTestSource({ space: viewer });
-  let frames = 0, t0 = performance.now();
-  session.addEventListener("end", () => { $("overlay").hidden = true; session = null; });
-  const onFrame = (t, frame) => {
+    const gl = document.createElement("canvas").getContext("webgl", { xrCompatible: true });
+    const layer = new XRWebGLLayer(session, gl);
+    session.updateRenderState({ baseLayer: layer });
+    const space = await session.requestReferenceSpace(cfg.space);
+    let hitSource = null;
+    if (session.enabledFeatures && session.enabledFeatures.includes("hit-test")) {
+      hitSource = await session.requestHitTestSource({ space: await session.requestReferenceSpace("viewer") });
+    }
+    const onFrame = (t, frame) => {
+      session.requestAnimationFrame(onFrame);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      st.frames++;
+      const pose = frame.getViewerPose(space);
+      if (pose) {
+        st.poses++;
+        if (pose.emulatedPosition) st.emulated++;
+        if (st.firstPoseMs === null) st.firstPoseMs = Math.round(t - t0);
+      }
+      if (hitSource && frame.getHitTestResults(hitSource).length) st.hits++;
+      if (init.domOverlay && st.frames % 15 === 0) {
+        $("box").textContent = `тест ${name}: кадров ${st.frames}, с позой ${st.poses}, пол найден ${st.hits}`;
+      }
+    };
     session.requestAnimationFrame(onFrame);
-    const pose = frame.getViewerPose(floor);
-    if (pose) {
-      const p = pose.transform.position;
-      $("pose").textContent = `поза: x=${p.x.toFixed(2)} y=${p.y.toFixed(2)} z=${p.z.toFixed(2)} м`;
-    }
-    const hits = frame.getHitTestResults(hitSource);
-    if (hits.length) {
-      const hp = hits[0].getPose(floor).transform.position;
-      $("hit").textContent = `пол/поверхность: x=${hp.x.toFixed(2)} y=${hp.y.toFixed(2)} z=${hp.z.toFixed(2)}`;
-    } else {
-      $("hit").textContent = "пол: не найден (поводите телефоном)";
-    }
-    frames++;
-    if (t - t0 > 1000) { $("fps").textContent = `кадров/с: ${frames}`; frames = 0; t0 = t; }
-  };
-  session.requestAnimationFrame(onFrame);
+  } catch (e) { st.err = e.message; }
+  setTimeout(() => session.end().catch(() => {}), 15000);
+  session.addEventListener("end", () => {
+    $("overlay").hidden = true;
+    results[name] = `кадров ${st.frames}, с позой ${st.poses} (только поворот: ${st.emulated}), ` +
+      `первая поза через ${st.firstPoseMs === null ? "—" : st.firstPoseMs + " мс"}, пол найден в ${st.hits} кадрах, ` +
+      `оверлей: ${st.overlay}, функции: ${(session.enabledFeatures || []).join(",") || "—"}` +
+      `${st.err ? ", ошибка: " + st.err : ""}`;
+    report();
+  });
 }
 
-function alertLine(text) { const d = document.createElement("p"); d.className = "bad"; d.textContent = text; document.body.append(d); }
-$("start").onclick = start;
-$("stop").onclick = () => session && session.end();
-probe();
+(async () => {
+  let ok = false;
+  try { ok = !!navigator.xr && await navigator.xr.isSessionSupported("immersive-ar"); } catch { ok = false; }
+  mark("ar", ok, ok ? "поддерживается" : "не поддерживается");
+  for (const b of document.querySelectorAll("[data-test]")) { b.disabled = !ok; b.onclick = () => run(b.dataset.test); }
+})();
 </script>
 </body>
 </html>
