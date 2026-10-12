@@ -1,0 +1,64 @@
+#include "settings.h"
+
+#include <string.h>
+
+#include "nvs.h"
+
+#define NS "wsn"
+
+static bool all_zero(const uint8_t *p, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (p[i]) return false;
+    return true;
+}
+
+esp_err_t settings_load(wsn_settings_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->port = 5005;
+    out->ping_hz = 100;
+    out->csi_source = 0;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READONLY, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK; /* first boot */
+    if (err != ESP_OK) return err;
+    size_t len = sizeof(out->ssid);
+    nvs_get_str(h, "ssid", out->ssid, &len);
+    len = sizeof(out->pass);
+    nvs_get_str(h, "pass", out->pass, &len);
+    len = sizeof(out->host);
+    nvs_get_str(h, "host", out->host, &len);
+    len = sizeof(out->bssid);
+    nvs_get_blob(h, "bssid", out->bssid, &len);
+    len = sizeof(out->key);
+    nvs_get_blob(h, "key", out->key, &len);
+    nvs_get_u16(h, "port", &out->port);
+    nvs_get_u16(h, "ping_hz", &out->ping_hz);
+    nvs_get_u8(h, "csi_src", &out->csi_source);
+    nvs_close(h);
+    return ESP_OK;
+}
+
+esp_err_t settings_save(const wsn_settings_t *s)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(h, "ssid", s->ssid);
+    if (!err) err = nvs_set_str(h, "pass", s->pass);
+    if (!err) err = nvs_set_str(h, "host", s->host);
+    if (!err) err = nvs_set_blob(h, "bssid", s->bssid, sizeof(s->bssid));
+    if (!err) err = nvs_set_blob(h, "key", s->key, sizeof(s->key));
+    if (!err) err = nvs_set_u16(h, "port", s->port);
+    if (!err) err = nvs_set_u16(h, "ping_hz", s->ping_hz);
+    if (!err) err = nvs_set_u8(h, "csi_src", s->csi_source);
+    if (!err) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+bool settings_complete(const wsn_settings_t *s)
+{
+    return s->ssid[0] && s->host[0] && !all_zero(s->bssid, 6) && !all_zero(s->key, 32);
+}
