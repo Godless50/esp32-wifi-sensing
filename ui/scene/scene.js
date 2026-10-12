@@ -154,7 +154,7 @@ function buildPlan(plan) {
     box.position.copy(v3(o.xy[0], o.xy[1], z0 + h / 2));
     if (o.type === "телевизор") box.material.color.set(0x15171a);
     box.rotation.y = o.rot || 0;  // поворот против часовой в системе плана
-    if (o.type === "арка" || o.type === "дверь") { box.material.transparent = true; box.material.opacity = 0.35; }
+    if (o.type === "арка" || o.type === "дверь" || o.type === "окно") { box.material.transparent = true; box.material.opacity = 0.35; }
     planGroup.add(box);
     const l = label(o.type, "#e6e9ee", 0.3);
     l.position.copy(v3(o.xy[0], o.xy[1], z0 + h + 0.25));
