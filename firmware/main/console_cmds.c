@@ -44,8 +44,8 @@ static int cmd_wifi(int argc, char **argv)
         puts("ERR usage: wifi set <ssid> <pass> <bssid>");
         return 1;
     }
-    if (strlen(argv[2]) == 0 || strlen(argv[2]) > 32 || strlen(argv[3]) > 64 || wsn_parse_mac(argv[4], mac)) {
-        puts("ERR bad ssid/pass/bssid");
+    if (strlen(argv[2]) == 0 || strlen(argv[2]) > 32 || !wsn_valid_wpa_pass(argv[3]) || wsn_parse_mac(argv[4], mac)) {
+        puts("ERR bad ssid/pass/bssid (pass: empty, 8..63 chars or 64 hex)");
         return 1;
     }
     return edit(set_wifi, argv, "OK wifi");

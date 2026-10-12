@@ -58,6 +58,19 @@ esp_err_t settings_save(const wsn_settings_t *s)
     return err;
 }
 
+uint32_t settings_next_boot_id(void)
+{
+    nvs_handle_t h;
+    uint32_t boot = 0;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return 0;
+    nvs_get_u32(h, "boot", &boot); /* missing -> 0 */
+    boot++;
+    esp_err_t err = nvs_set_u32(h, "boot", boot);
+    if (!err) err = nvs_commit(h);
+    nvs_close(h);
+    return err ? 0 : boot;
+}
+
 bool settings_complete(const wsn_settings_t *s)
 {
     return s->ssid[0] && s->host[0] && !all_zero(s->bssid, 6) && !all_zero(s->key, 32);

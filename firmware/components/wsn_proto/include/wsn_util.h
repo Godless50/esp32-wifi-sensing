@@ -11,6 +11,8 @@ extern "C" {
 int wsn_parse_mac(const char *s, uint8_t out[6]);
 /* Exactly 2*n hex digits -> n bytes. 0 on success. */
 int wsn_parse_hex(const char *s, uint8_t *out, size_t n);
+/* WPA passphrase accepted by the Wi-Fi driver: empty (open), 8..63 chars, or exactly 64 hex digits. */
+int wsn_valid_wpa_pass(const char *s);
 /* 6 bytes -> "aa:bb:cc:dd:ee:ff" (out >= 18 bytes). */
 void wsn_format_mac(const uint8_t mac[6], char out[18]);
 

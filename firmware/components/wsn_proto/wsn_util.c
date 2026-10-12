@@ -34,6 +34,17 @@ int wsn_parse_hex(const char *s, uint8_t *out, size_t n)
     return 0;
 }
 
+int wsn_valid_wpa_pass(const char *s)
+{
+    if (!s) return 0;
+    size_t n = strlen(s);
+    if (n == 0 || (n >= 8 && n <= 63)) return 1;
+    if (n != 64) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (hexval(s[i]) < 0) return 0;
+    return 1;
+}
+
 void wsn_format_mac(const uint8_t mac[6], char out[18])
 {
     snprintf(out, 18, "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);

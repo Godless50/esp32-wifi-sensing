@@ -20,5 +20,7 @@ typedef struct {
 /* Missing fields get defaults: port=5005, ping_hz=100, csi_source=0. */
 esp_err_t settings_load(wsn_settings_t *out);
 esp_err_t settings_save(const wsn_settings_t *s);
+/* Monotonic boot counter kept in NVS: increments and returns the new value (>= 1). 0 on NVS error. */
+uint32_t settings_next_boot_id(void);
 /* True when ssid, bssid, host and key are all set. */
 bool settings_complete(const wsn_settings_t *s);

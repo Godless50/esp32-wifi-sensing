@@ -5,6 +5,20 @@
 
 #include "wsn_util.h"
 
+static void test_wpa_pass(void)
+{
+    assert(wsn_valid_wpa_pass(""));                 /* open network */
+    assert(wsn_valid_wpa_pass("TJ4AC6JE"));         /* 8 chars */
+    assert(!wsn_valid_wpa_pass("short"));           /* 1..7 chars rejected */
+    char p63[64], p64[65];
+    memset(p63, 'a', 63); p63[63] = 0;
+    assert(wsn_valid_wpa_pass(p63));
+    memset(p64, 'f', 64); p64[64] = 0;
+    assert(wsn_valid_wpa_pass(p64));                /* 64 hex = raw PSK */
+    p64[10] = 'z';
+    assert(!wsn_valid_wpa_pass(p64));               /* 64 non-hex rejected */
+}
+
 int main(void)
 {
     uint8_t mac[6];
@@ -29,6 +43,7 @@ int main(void)
     char out[18];
     wsn_format_mac(want, out);
     assert(strcmp(out, "02:00:00:00:a1:18") == 0);
+    test_wpa_pass();
     puts("OK util");
     return 0;
 }

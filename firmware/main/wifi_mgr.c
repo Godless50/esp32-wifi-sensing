@@ -96,7 +96,11 @@ esp_err_t wifi_mgr_start(const wsn_settings_t *s)
         cfg.sta.channel = 0;
         cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
         cfg.sta.pmf_cfg.capable = true;
-        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
+        esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+        if (err != ESP_OK) { /* не падать в цикл перезагрузок: консоль должна остаться доступной */
+            ESP_LOGE(TAG, "wifi config rejected (%s): fix with 'wifi set' and reboot", esp_err_to_name(err));
+            s_enabled = false;
+        }
     } else {
         ESP_LOGW(TAG, "settings incomplete: use console (wifi set / server set / key set)");
     }
