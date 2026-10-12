@@ -1,0 +1,20 @@
+name: wsn
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    image: wsn-server
+    command: ["python", "-m", "wsn"]
+    environment:
+      WSN_UDP_PORT: "5005"
+      WSN_HTTP_PORT: "8080"
+      WSN_DATA: /data
+      WSN_UI: /ui
+    volumes:
+      - ../data:/data
+      - ../ui:/ui:ro
+    ports:
+      - "5005:5005/udp"
+      - "8080:8080"
+    restart: unless-stopped
