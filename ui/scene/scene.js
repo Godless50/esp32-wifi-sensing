@@ -131,15 +131,33 @@ function buildPlan(plan) {
     l.position.copy(v3(cx, cy, 0.25));
     planGroup.add(l);
   });
+  for (const z of plan.zones || []) { // зона без стен (открытая кухня): плитка на полу и пунктирная граница
+    const shape = new THREE.Shape(z.polygon.map(([x, y]) => new THREE.Vector2(x, y)));
+    const patch = new THREE.Mesh(new THREE.ShapeGeometry(shape),
+      new THREE.MeshStandardMaterial({ color: 0xd8cfbd, transparent: true, opacity: 0.85, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1 }));
+    patch.rotation.x = -Math.PI / 2;
+    patch.position.y = 0.01;
+    planGroup.add(patch);
+    const outline = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(z.polygon.map(([x, y]) => v3(x, y, 0.02))),
+      new THREE.LineDashedMaterial({ color: 0x9a8a6a, dashSize: 0.15, gapSize: 0.1 }));
+    outline.computeLineDistances();
+    planGroup.add(outline);
+    const [cx, cy] = centroid(z.polygon);
+    const l = label(`${z.name} · ${area(z.polygon).toFixed(1)} м²`, "#c9b48a", 0.36);
+    l.position.copy(v3(cx, cy, 0.25));
+    planGroup.add(l);
+  }
   for (const o of plan.objects || []) {
     const [w, d, h] = o.size || [0.5, 0.5, 0.8];
     const box = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color: 0x8d7b68 }));
-    box.position.copy(v3(o.xy[0], o.xy[1], h / 2));
+    const z0 = o.z || 0; // высота низа предмета над полом
+    box.position.copy(v3(o.xy[0], o.xy[1], z0 + h / 2));
+    if (o.type === "телевизор") box.material.color.set(0x15171a);
     box.rotation.y = o.rot || 0;  // поворот против часовой в системе плана
     if (o.type === "арка" || o.type === "дверь") { box.material.transparent = true; box.material.opacity = 0.35; }
     planGroup.add(box);
     const l = label(o.type, "#e6e9ee", 0.3);
-    l.position.copy(v3(o.xy[0], o.xy[1], h + 0.25));
+    l.position.copy(v3(o.xy[0], o.xy[1], z0 + h + 0.25));
     planGroup.add(l);
   }
   const marker = (xy, color, text, h) => {

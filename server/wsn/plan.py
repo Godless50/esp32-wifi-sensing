@@ -108,6 +108,7 @@ def build_plan(store: Store) -> dict:
         store.set_plan_status(s.id, True, warn)
     # ручные правки плана (по словам пользователя) имеют приоритет над обходами
     edited = set()
+    zones: list[dict] = []
     ov_path = overrides_path(store)
     if ov_path.exists():
         try:
@@ -117,14 +118,20 @@ def build_plan(store: Store) -> dict:
                 if polygon_valid(pts) is None:
                     rooms[name] = [[round(x, 3), round(y, 3)] for x, y in pts]
                     edited.add(name)
+            for name, poly in ov.get("zones", {}).items():  # зоны без стен внутри комнаты (открытая кухня)
+                pts = [(float(x), float(y)) for x, y in poly]
+                if polygon_valid(pts) is None:
+                    zones.append({"name": name, "polygon": [[round(x, 3), round(y, 3)] for x, y in pts]})
             if isinstance(ov.get("objects"), list):  # ручной список предметов заменяет отмеченные в обходах
                 objects = [{"type": str(o["type"]), "xy": [float(o["xy"][0]), float(o["xy"][1])],
                             "size": [float(v) for v in o.get("size", [0.5, 0.5, 0.8])][:3],
-                            "rot": float(o.get("rot", 0.0)), "session": "edited"} for o in ov["objects"]]
+                            "rot": float(o.get("rot", 0.0)), "z": float(o.get("z", 0.0)),  # z — высота низа (ТВ на стене)
+                            "session": "edited"} for o in ov["objects"]]
         except (ValueError, TypeError, AttributeError):
             warnings["overrides"] = "plan_overrides.json is malformed; ignored"
     return {
         "rooms": [{"name": n, "polygon": poly, "edited": n in edited} for n, poly in rooms.items()],
+        "zones": zones,
         "objects": objects,
         "board": [0.0, 0.0],
         "router": router_xy,
