@@ -9,7 +9,8 @@ ROOT=$PWD
 CMD="${1:-build}"
 mkdir -p "$ROOT/.gradle-cache"
 run() {
-  docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e GRADLE_USER_HOME=/cache \
+  # HOME в постоянном томе: там ~/.android/debug.keystore — иначе каждая сборка подписана новым ключом
+  docker run --rm -u "$(id -u):$(id -g)" -e HOME=/cache/home -e GRADLE_USER_HOME=/cache \
     -v "$ROOT/android":/project -v "$ROOT/.gradle-cache":/cache wsn-android-build "$@"
 }
 copy_ca() {
