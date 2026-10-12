@@ -25,7 +25,13 @@ def main() -> None:
     store = Store(data / "wsn.db", data / "sessions")
     recorder = Recorder(store)
     ingest = IngestService(keys, hub.on_packet, state_path=data / "boot_state.json", on_raw=recorder.on_datagram)
-    app = create_app(hub, ingest, ui, udp_port=udp_port, store=store, recorder=recorder)
+    def default_device() -> str | None:
+        """The board that streamed most recently (within 10 s): the one a phone session records."""
+        live = [d for d in hub.devices() if d.age_s < 10]
+        return min(live, key=lambda d: d.age_s).device_id if live else None
+
+    app = create_app(hub, ingest, ui, udp_port=udp_port, store=store, recorder=recorder,
+                     default_device=default_device)
     uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
 
 

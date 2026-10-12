@@ -14,6 +14,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from typing import Callable
+
+from .capture import CaptureProtocol
 from .ingest import IngestService
 from .live import LiveHub
 from .recorder import Recorder
@@ -36,8 +39,14 @@ def create_app(
     udp_port: int | None = None,
     store: Store | None = None,
     recorder: Recorder | None = None,
+    default_device: Callable[[], str | None] | None = None,
 ) -> FastAPI:
     ui_dir = Path(ui_dir)
+    capture = (
+        CaptureProtocol(store, recorder, default_device or (lambda: None))
+        if store is not None and recorder is not None
+        else None
+    )
 
     async def ticker() -> None:
         while True:
@@ -122,6 +131,35 @@ def create_app(
             pass
         finally:
             sub.close()
+
+    @app.websocket("/ws/capture")
+    async def ws_capture(ws: WebSocket) -> None:
+        await ws.accept()
+        if capture is None:
+            await ws.close(code=1013)
+            return
+        cid = f"anon-{id(ws)}"
+        last_state = time.monotonic()
+        try:
+            while True:
+                try:
+                    msg = await asyncio.wait_for(ws.receive_json(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    msg = None
+                if msg is not None:
+                    if msg.get("type") == "hello" and msg.get("client_id"):
+                        cid = str(msg["client_id"])[:64]
+                    for reply in capture.on_message(cid, msg):
+                        await ws.send_json(reply)
+                if time.monotonic() - last_state >= 1.0:
+                    last_state = time.monotonic()
+                    st = capture.state(cid)
+                    devs = {d.device_id: d for d in hub.devices()}
+                    d = devs.get(st["device_id"] or "")
+                    st["csi_hz"] = d.csi_hz if d else 0.0
+                    await ws.send_json(st)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
 
     def page(rel: str):
         def handler() -> FileResponse:
