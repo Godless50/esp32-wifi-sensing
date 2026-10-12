@@ -38,15 +38,21 @@ def build_plan(store: Store) -> dict:
     skipped: dict[str, str] = {}
     warnings: dict[str, str] = {}
     router_xy = None
+    walks = []
     for s in store.list_sessions():
         if s.stopped is None or s.kind != "walk":
             continue
+        events = _read_jsonl(store.session_dir(s.id) / "events.jsonl")
+        walks.append((s, events, _last(events, "origin"), _last(events, "router")))
+    # обходы с полной системой координат совместимы между собой; без роутера — только если других нет
+    have_full = any(o is not None and r is not None for _, _, o, r in walks)
+    for s, events, origin, router in walks:
         d = store.session_dir(s.id)
-        events = _read_jsonl(d / "events.jsonl")
-        origin, router = _last(events, "origin"), _last(events, "router")
         reason, warn = "", ""
         if origin is None:
             reason = "no origin mark (board)"
+        elif router is None and have_full:
+            reason = "no router mark"
         elif router is None:
             # без роутера: начало — плата, оси — оси AR-сессии (поворот плана произвольный)
             frame = Frame(xr_to_floor(origin["p"]), 0.0)

@@ -73,6 +73,14 @@ def test_session_without_router_uses_board_and_session_axes(store):
     assert store.get(sid).plan_ok is True and "router" in store.get(sid).plan_reason
 
 
+def test_session_without_router_ignored_when_full_session_exists(store):
+    full = record(store, theta=0, tx=0, ty=0, t0=100)
+    partial = record(store, theta=1.0, tx=2, ty=1, t0=300, with_router=False)
+    plan = build_plan(store)
+    assert "router" in plan["skipped"][partial] and full not in plan["skipped"]
+    assert plan["warnings"] == {}
+
+
 def test_session_without_board_skipped(store):
     s = store.start_session("walk", DEV, now=100)
     store.append_event({"seq": 1, "t": 101, "kind": "room_new", "name": "A"})

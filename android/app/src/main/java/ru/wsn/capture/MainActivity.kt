@@ -283,7 +283,11 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 client.event("corner", JSONObject().put("p", p).put("source", src)); roomCorners++
                 log("Угол $roomCorners${if (src == "phone") " (по телефону)" else ""}.")
             }
-            "close" -> { client.event("room_close"); roomOpen = null }
+            "close" -> {
+                val r = roomOpen ?: run { log("Комната уже закрыта.", true); return }
+                client.event("room_close"); roomOpen = null
+                log("Комната «$r» закрыта: $roomCorners угл. Следующая — «Новая комната».")
+            }
             "object" -> {
                 val h = hitPos
                 val p = if (h != null) JSONArray(h.map { it.toDouble() }) else (needPose() ?: return)
