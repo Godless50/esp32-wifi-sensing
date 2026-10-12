@@ -135,6 +135,8 @@ function buildPlan(plan) {
     const [w, d, h] = o.size || [0.5, 0.5, 0.8];
     const box = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color: 0x8d7b68 }));
     box.position.copy(v3(o.xy[0], o.xy[1], h / 2));
+    box.rotation.y = o.rot || 0;  // поворот против часовой в системе плана
+    if (o.type === "арка" || o.type === "дверь") { box.material.transparent = true; box.material.opacity = 0.35; }
     planGroup.add(box);
     const l = label(o.type, "#e6e9ee", 0.3);
     l.position.copy(v3(o.xy[0], o.xy[1], h + 0.25));
