@@ -186,7 +186,7 @@ function buildTrajectories(plan) {
 
 function setView(mode) {
   const { cx, cy } = bbox;
-  const size = bbox.size / Math.min(1, camera.aspect);  // узкий экран телефона — камера дальше
+  const size = bbox.size / Math.pow(Math.min(1, camera.aspect), 1.6);  // узкий экран телефона — камера дальше
   controls.target.copy(v3(cx, cy, 0));
   if (mode === "top") camera.position.copy(v3(cx, cy - 0.001, size * 1.35));
   else camera.position.copy(v3(cx - size * 0.7, cy - size * 1.0, size * 1.05));
