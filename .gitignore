@@ -11,3 +11,4 @@ secrets*
 firmware/components/wsn_proto/test/host_test
 firmware/components/wsn_proto/test/golden_bin
 firmware/components/wsn_proto/test/util_test
+.gradle-cache/
