@@ -63,11 +63,22 @@ def test_trajectory_decimated_to_5hz(store):
     assert traj[-1][1] == pytest.approx(2.45, abs=0.06)
 
 
-def test_session_without_router_skipped(store):
+def test_session_without_router_uses_board_and_session_axes(store):
     sid = record(store, theta=0, tx=0, ty=0, t0=100, with_router=False)
     plan = build_plan(store)
-    assert plan["rooms"] == [] and "router" in plan["skipped"][sid]
-    assert store.get(sid).plan_ok is False and "router" in store.get(sid).plan_reason
+    (room,) = plan["rooms"]
+    assert len(room["polygon"]) == 4  # комнаты сессии сохраняются, начало — плата
+    assert plan["router"] is None and sid not in plan["skipped"]
+    assert sid in plan["warnings"] and "router" in plan["warnings"][sid]
+    assert store.get(sid).plan_ok is True and "router" in store.get(sid).plan_reason
+
+
+def test_session_without_board_skipped(store):
+    s = store.start_session("walk", DEV, now=100)
+    store.append_event({"seq": 1, "t": 101, "kind": "room_new", "name": "A"})
+    store.stop_session(s.id, now=110)
+    plan = build_plan(store)
+    assert "origin" in plan["skipped"][s.id]
 
 
 def test_unclosed_room_with_unordered_duplicate_corners_is_kept(store):

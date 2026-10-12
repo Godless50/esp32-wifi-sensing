@@ -6,7 +6,7 @@ import json
 import math
 from pathlib import Path
 
-from .geometry import GeometryError, frame_from_points, normalize_corners, polygon_valid, xr_to_floor
+from .geometry import Frame, GeometryError, frame_from_points, normalize_corners, polygon_valid, xr_to_floor
 from .store import Store
 
 TRAJ_MIN_DT = 0.2  # 5 Гц
@@ -36,6 +36,7 @@ def build_plan(store: Store) -> dict:
     objects: list[dict] = []
     trajectories: dict[str, list] = {}
     skipped: dict[str, str] = {}
+    warnings: dict[str, str] = {}
     router_xy = None
     for s in store.list_sessions():
         if s.stopped is None or s.kind != "walk":
@@ -43,11 +44,13 @@ def build_plan(store: Store) -> dict:
         d = store.session_dir(s.id)
         events = _read_jsonl(d / "events.jsonl")
         origin, router = _last(events, "origin"), _last(events, "router")
-        reason = ""
+        reason, warn = "", ""
         if origin is None:
             reason = "no origin mark (board)"
         elif router is None:
-            reason = "no router mark"
+            # без роутера: начало — плата, оси — оси AR-сессии (поворот плана произвольный)
+            frame = Frame(xr_to_floor(origin["p"]), 0.0)
+            warn = "no router mark: axes are arbitrary"
         else:
             try:
                 frame = frame_from_points(origin["p"], router["p"])
@@ -57,7 +60,10 @@ def build_plan(store: Store) -> dict:
             skipped[s.id] = reason
             store.set_plan_status(s.id, False, reason)
             continue
-        router_xy = [round(v, 3) for v in frame.apply(router["p"])]
+        if warn:
+            warnings[s.id] = warn
+        else:
+            router_xy = [round(v, 3) for v in frame.apply(router["p"])]
         current: tuple[str, list] | None = None
 
         def finish(room) -> None:
@@ -89,7 +95,7 @@ def build_plan(store: Store) -> dict:
             traj.append([round(p["t"], 3), round(x, 3), round(y, 3)])
             last_t = p["t"]
         trajectories[s.id] = traj
-        store.set_plan_status(s.id, True, "")
+        store.set_plan_status(s.id, True, warn)
     return {
         "rooms": [{"name": n, "polygon": poly} for n, poly in rooms.items()],
         "objects": objects,
@@ -97,6 +103,7 @@ def build_plan(store: Store) -> dict:
         "router": router_xy,
         "trajectories": trajectories,
         "skipped": skipped,
+        "warnings": warnings,
     }
 
 

@@ -75,6 +75,10 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var roomOpen: String? = null
     private var roomCorners = 0
     private var lastCorner: FloatArray? = null
+    private var hasOrigin = false
+    private var hasRouter = false
+    private var roomsStarted = 0
+    private var sessionKey: String? = null
     private val logLines = ArrayDeque<String>()
 
     private fun nowMs(): Double = SystemClock.elapsedRealtimeNanos() / 1e6
@@ -251,11 +255,19 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 log("Пустая квартира: ${dur / 60} мин. Уходите, запись остановится сама.")
             }
             "stop" -> client.event("session_stop")
-            "origin" -> needPose()?.let { client.event("origin", JSONObject().put("p", it)); log("Плата отмечена.") }
-            "router" -> needPose()?.let { client.event("router", JSONObject().put("p", it)); log("Роутер отмечен.") }
+            "origin" -> {
+                if (roomsStarted > 0) { log("Плату отмечают один раз, стоя у платы, до комнат. Начните новую запись.", true); return }
+                needPose()?.let { client.event("origin", JSONObject().put("p", it)); hasOrigin = true; log("Плата отмечена. Теперь идите к роутеру B.") }
+            }
+            "router" -> {
+                if (!hasOrigin) { log("Сначала встаньте у платы и нажмите «Я у платы».", true); return }
+                needPose()?.let { client.event("router", JSONObject().put("p", it)); hasRouter = true; log("Роутер отмечен. Можно отмечать комнаты.") }
+            }
             "room" -> {
-                val name = roomName.text.toString().trim().ifEmpty { "Комната ${logLines.size}" }
-                client.event("room_new", JSONObject().put("name", name)); roomOpen = name; roomCorners = 0; lastCorner = null
+                if (!hasOrigin || !hasRouter) { log("Сначала «Я у платы» у платы, затем «Я у роутера» у роутера B.", true); return }
+                val name = roomName.text.toString().trim().ifEmpty { "Комната ${roomsStarted + 1}" }
+                if (name == roomOpen) { log("Комната «$name» уже открыта — отмечайте углы.", true); return }
+                client.event("room_new", JSONObject().put("name", name)); roomOpen = name; roomCorners = 0; lastCorner = null; roomsStarted++
                 log("Комната «$name»: отмечайте углы на полу.")
             }
             "corner" -> {
@@ -301,6 +313,10 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private fun render() {
         if (!this::status.isInitialized) return
         val s = client.session
+        val key = s?.optString("id")
+        if (key != sessionKey) { // новая запись — чек-лист заново
+            sessionKey = key; hasOrigin = false; hasRouter = false; roomsStarted = 0; roomOpen = null; roomCorners = 0; lastCorner = null
+        }
         val rec = s != null && client.owner
         val recText = when {
             s == null -> "не пишем"
@@ -310,7 +326,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
         val tr = when (tracking) { TrackingState.TRACKING -> "трекинг ок"; TrackingState.PAUSED -> "трекинг: поводите телефоном"; else -> "трекинг: нет" }
         status.text = "${if (client.online) (if (client.clockSynced) "онлайн" else "синхронизация…") else "нет связи"} · $recText · " +
-            "CSI ${client.csiHz.roundToInt()} Гц · очередь ${client.pendingCount()}\n$tr · ${roomOpen?.let { "«$it»: углов $roomCorners · " } ?: ""}$cameraInfo"
+            "CSI ${client.csiHz.roundToInt()} Гц · очередь ${client.pendingCount()}\n$tr · ${if (s?.optString("kind") == "walk") "плата ${if (hasOrigin) "✓" else "✗"} роутер ${if (hasRouter) "✓" else "✗"} · " else ""}${roomOpen?.let { "«$it»: углов $roomCorners · " } ?: ""}$cameraInfo"
         cross.background = ring(if (hitPos != null) Color.WHITE else Color.rgb(224, 164, 58))
         bWalk.isEnabled = s == null; bEmpty.isEnabled = s == null; durSpinner.isEnabled = s == null
         bStop.isEnabled = rec
