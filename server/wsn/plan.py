@@ -115,19 +115,21 @@ class RoomTracker:
 
     def reset(self) -> None:
         self.origin = None
+        self.router = None
         self.corners: list | None = None
 
     def check(self, kind: str, rec: dict) -> tuple[str, str] | None:
+        # плата и роутер — в любом порядке: систему координат считаем после записи
         if kind == "session_start":
             self.reset()
-        elif kind == "origin" and rec.get("p") is not None:
-            self.origin = rec["p"]
-        elif kind == "router":
-            if self.origin is None:
-                return ("bad_router", "mark the board position first")
-            dist = math.dist(xr_to_floor(self.origin), xr_to_floor(rec.get("p") or self.origin))
-            if dist < 0.5:
-                return ("bad_router", f"router is {dist:.2f} m from the board; walk to the router first")
+        elif kind in ("origin", "router") and rec.get("p") is not None:
+            other = self.router if kind == "origin" else self.origin
+            if other is not None:
+                dist = math.dist(xr_to_floor(other), xr_to_floor(rec["p"]))
+                if dist < 0.5:
+                    code = "bad_router" if kind == "router" else "bad_origin"
+                    return (code, f"board and router are {dist:.2f} m apart; mark each one standing next to it")
+            setattr(self, kind, rec["p"])
         elif kind == "room_new":
             self.corners = []
         elif kind == "corner":

@@ -147,6 +147,9 @@ class CaptureProtocol:
                 problem = self.validate_event(ev_kind, rec)
                 if problem:
                     c.event_seq = seq  # отклонённое событие не надо пересылать
+                    # для разбора: сохраняем, но под другим kind, чтобы план его не учитывал
+                    self.store.append_event({**rec, "kind": "rejected", "orig_kind": ev_kind,
+                                             "code": problem[0], "message": problem[1]})
                     return [_err(*problem), self._ack(c)]
             self.store.append_event(rec)
             if ev_kind == "session_stop":

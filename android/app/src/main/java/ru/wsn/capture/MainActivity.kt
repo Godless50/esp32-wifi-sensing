@@ -89,7 +89,10 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         val cid = prefs.getString("client_id", null) ?: ("android-" + UUID.randomUUID().toString().take(8)).also {
             prefs.edit().putString("client_id", it).apply()
         }
-        client = CaptureClient(cid, ::nowMs) { code, msg -> log(ERRORS[code]?.let { if (it.endsWith(": ")) it + msg else it } ?: msg, true) }
+        client = CaptureClient(cid, ::nowMs) { code, msg ->
+            if (code == "bad_router") main.post { hasRouter = false }
+            if (code == "bad_origin") main.post { hasOrigin = false }
+            log(ERRORS[code]?.let { if (it.endsWith(": ")) it + msg else it } ?: msg, true) }
         client.sink = CaptureClient.Sink { transport?.send(it) }
         buildUi()
         if (prefs.getString("password", "").isNullOrEmpty()) askSettings() else connect()
@@ -254,17 +257,13 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 client.event("session_start", JSONObject().put("session_kind", "empty").put("duration_s", dur))
                 log("Пустая квартира: ${dur / 60} мин. Уходите, запись остановится сама.")
             }
-            "stop" -> client.event("session_stop")
-            "origin" -> {
-                if (roomsStarted > 0) { log("Плату отмечают один раз, стоя у платы, до комнат. Начните новую запись.", true); return }
-                needPose()?.let { client.event("origin", JSONObject().put("p", it)); hasOrigin = true; log("Плата отмечена. Теперь идите к роутеру B.") }
+            "stop" -> {
+                if (!hasOrigin || !hasRouter) log("Запись без отметки ${if (!hasOrigin) "платы" else "роутера"} — план будет неточным.", true)
+                client.event("session_stop")
             }
-            "router" -> {
-                if (!hasOrigin) { log("Сначала встаньте у платы и нажмите «Я у платы».", true); return }
-                needPose()?.let { client.event("router", JSONObject().put("p", it)); hasRouter = true; log("Роутер отмечен. Можно отмечать комнаты.") }
-            }
+            "origin" -> needPose()?.let { client.event("origin", JSONObject().put("p", it)); hasOrigin = true; log("Плата отмечена.") }
+            "router" -> needPose()?.let { client.event("router", JSONObject().put("p", it)); hasRouter = true; log("Роутер отмечен.") }
             "room" -> {
-                if (!hasOrigin || !hasRouter) { log("Сначала «Я у платы» у платы, затем «Я у роутера» у роутера B.", true); return }
                 val name = roomName.text.toString().trim().ifEmpty { "Комната ${roomsStarted + 1}" }
                 if (name == roomOpen) { log("Комната «$name» уже открыта — отмечайте углы.", true); return }
                 client.event("room_new", JSONObject().put("name", name)); roomOpen = name; roomCorners = 0; lastCorner = null; roomsStarted++
@@ -418,7 +417,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             "session_busy" to "Уже идёт запись с другого телефона.", "not_owner" to "Запись ведёт другой телефон.",
             "no_session" to "Запись не идёт.", "no_clock_sync" to "Синхронизирую время, повторите через секунду.",
             "no_device" to "Плата не передаёт CSI — проверьте её.", "bad_polygon" to "Комната не замкнута: ",
-            "bad_router" to "Роутер: ", "no_room" to "Сначала «Новая комната».", "bad_session" to "Не удалось начать запись: ",
+            "bad_router" to "Роутер не принят: ", "bad_origin" to "Плата не принята: ", "no_room" to "Сначала «Новая комната».", "bad_session" to "Не удалось начать запись: ",
         )
     }
 }

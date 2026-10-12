@@ -117,3 +117,10 @@ def test_room_tracker_validates_live():
     rt.check("corner", {"p": [1, 0, -1]})
     assert rt.check("room_close", {}) is None
     assert rt.check("corner", {"p": [0, 0, 0]})[0] == "no_room"  # угол без «новой комнаты»
+
+
+def test_router_before_board_accepted():
+    rt = RoomTracker()
+    assert rt.check("router", {"p": [0, 1.4, -3]}) is None  # обход начат не от платы
+    assert rt.check("origin", {"p": [0.1, 1.4, -3.1]})[0] == "bad_origin"
+    assert rt.check("origin", {"p": [-8, 1.4, 0]}) is None
