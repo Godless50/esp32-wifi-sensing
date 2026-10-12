@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Literal
@@ -43,6 +44,7 @@ class DeviceStats:
     last_seen: float = 0.0
     rssi: int | None = None
     telemetry: Telemetry | None = None
+    age_s: float = 0.0
     counters: dict[str, int] = field(default_factory=lambda: {"frames": 0, "packets": 0})
 
 
@@ -105,8 +107,15 @@ class LiveHub:
     def subscriber_count(self) -> int:
         return len(self._subs)
 
-    def devices(self) -> list[DeviceStats]:
-        return list(self._stats.values())
+    def devices(self, now: float | None = None) -> list[DeviceStats]:
+        """Snapshot with rate and age evaluated at `now` (monotonic), so a silent device decays to 0 Hz."""
+        now = time.monotonic() if now is None else now
+        out = []
+        for dev_id, st in self._stats.items():
+            recent = sum(1 for t in self._times[dev_id] if t > now - _HZ_WINDOW_S)
+            out.append(dataclasses.replace(st, csi_hz=recent / _HZ_WINDOW_S,
+                                           age_s=max(0.0, now - st.last_seen), counters=dict(st.counters)))
+        return out
 
     def on_packet(self, p: Packet, recv_t: float) -> None:
         st = self._stats.get(p.device_id)

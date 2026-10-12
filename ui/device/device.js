@@ -77,6 +77,8 @@ function render() {
   const d = devices.find((x) => x.device_id === selected);
   const t = telem[selected] || (d && d.telemetry) || null;
   const warnings = [];
+  const stale = d && d.age_s > 3;
+  if (stale) warnings.push(`Нет данных от платы ${Math.round(d.age_s)} с — показания ниже устарели.`);
   if (d) {
     const hz = d.csi_hz;
     setText("hz_srv", hz.toFixed(1), hz >= 80 ? "okc" : "warn");
@@ -88,9 +90,9 @@ function render() {
     const drop = t.drop_ratio * 100;
     setText("drop", `${drop.toFixed(1)} %`, t.drop_ratio > 0.2 ? "warn" : "");
     if (t.drop_ratio > 0.2) warnings.push(`Отброшено ${drop.toFixed(0)} % кадров CSI (не подходят под csi_source).`);
-    const ws = WIFI_STATES[t.wifi_state] || `#${t.wifi_state}`;
-    setText("wifi", ws, t.wifi_state === 2 ? "okc" : "bad");
-    if (t.wifi_state !== 2) warnings.push(`Wi-Fi: ${ws}.`);
+    const ws = stale ? "НЕТ СВЯЗИ" : (WIFI_STATES[t.wifi_state] || `#${t.wifi_state}`);
+    setText("wifi", ws, !stale && t.wifi_state === 2 ? "okc" : "bad");
+    if (!stale && t.wifi_state !== 2) warnings.push(`Wi-Fi: ${ws}.`);
     setText("uptime", fmtUptime(t.uptime_s));
     setText("mem", `${Math.round(t.heap_free / 1024)} / ${Math.round(t.psram_free / 1024)}`);
     setText("ver", `${t.fw_ver} / ${t.model_ver}`);

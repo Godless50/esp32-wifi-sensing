@@ -55,7 +55,7 @@ def test_csi_hz():
     hub = LiveHub()
     for i in range(200):
         hub.on_packet(csi_packet(i, [frame()]), i * 0.01)
-    (d,) = hub.devices()
+    (d,) = hub.devices(now=1.99)
     assert d.device_id == MAC
     assert d.csi_hz == pytest.approx(100, rel=0.05)
     assert d.rssi == -45 and d.last_seen == pytest.approx(1.99)

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 class KeyStore:
@@ -14,7 +17,8 @@ class KeyStore:
         self.path = Path(path)
         self._lock = threading.Lock()
         self._keys: dict[str, bytes] = {}
-        self._mtime: float | None = None
+        self._mtime: int | None = None
+        self.errors = 0
         self._reload()
 
     def _reload(self) -> None:
@@ -25,9 +29,13 @@ class KeyStore:
             return
         if self._mtime == st.st_mtime_ns:
             return
-        raw = json.loads(self.path.read_text() or "{}")
-        self._keys = {k.lower(): bytes.fromhex(v) for k, v in raw.items()}
-        self._mtime = st.st_mtime_ns
+        self._mtime = st.st_mtime_ns  # битый файл не перечитывается на каждом пакете
+        try:
+            raw = json.loads(self.path.read_text() or "{}")
+            self._keys = {k.lower(): bytes.fromhex(v) for k, v in raw.items()}
+        except (ValueError, AttributeError, TypeError):
+            self.errors += 1
+            log.error("key file %s unreadable; keeping %d previously loaded keys", self.path, len(self._keys))
 
     def get(self, device_id: str) -> bytes | None:
         with self._lock:

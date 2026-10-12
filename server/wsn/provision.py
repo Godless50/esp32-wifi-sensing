@@ -102,11 +102,11 @@ def main() -> int:
         return 2
     mac = st["mac"].lower()
     ks = KeyStore(Path(a.keys))
-    key = ks.get(mac)
-    if key is None:
-        key = secrets.token_bytes(32)
-        ks.set(mac, key)
-        print(f"new key generated for {mac}")
+    # Ключ меняется при каждом провижининге: сервер по смене ключа сбрасывает счётчик загрузок
+    # устройства (нужно после стирания флеша, когда boot_id на плате снова начинается с 1).
+    key = secrets.token_bytes(32)
+    ks.set(mac, key)
+    print(f"new key generated for {mac}")
     steps = [
         ("key set " + key.hex(), "OK key"),
         (f"wifi set {console_quote(a.ssid)} {console_quote(password)} {a.bssid.lower()}", "OK wifi"),

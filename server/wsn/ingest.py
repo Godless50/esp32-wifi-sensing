@@ -1,12 +1,22 @@
-"""UDP ingest: signature check, replay protection (spec 4.5), counters."""
+"""UDP ingest: signature check, replay protection (spec 4.5), counters.
+
+boot_id is a monotonic per-device boot counter (firmware keeps it in NVS). A packet is fresh when
+boot_id > current, or boot_id == current and seq > last seq. The current boot per device is persisted
+so an api restart does not reopen old boots. Rotating a device key (re-provisioning) resets its state.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import os
+import tempfile
 import time
-from collections import deque
-from dataclasses import dataclass, field
+from collections import OrderedDict
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from .keys import KeyStore
@@ -14,18 +24,25 @@ from .protocol import Packet, ProtocolError, parse_packet, peek_device_id
 
 log = logging.getLogger(__name__)
 
+UNKNOWN_MAX = 32
+
 
 @dataclass
 class _DevState:
-    current_boot: int
+    boot: int
     last_seq: int
-    retired: deque = field(default_factory=lambda: deque(maxlen=64))
+    key_fp: str
+
+
+def _fp(key: bytes) -> str:
+    return hashlib.sha256(key).hexdigest()[:16]
 
 
 class IngestService(asyncio.DatagramProtocol):
-    def __init__(self, keys: KeyStore, on_packet: Callable[[Packet, float], None]):
+    def __init__(self, keys: KeyStore, on_packet: Callable[[Packet, float], None], state_path: Path | None = None):
         self.keys = keys
         self.on_packet = on_packet
+        self.state_path = Path(state_path) if state_path else None
         self.counters: dict[str, int] = {
             "accepted": 0,
             "rejected_unknown": 0,
@@ -34,8 +51,33 @@ class IngestService(asyncio.DatagramProtocol):
             "rejected_replay": 0,
             "callback_errors": 0,
         }
-        self.unknown_devices: set[str] = set()
-        self._state: dict[str, _DevState] = {}
+        self._unknown: OrderedDict[str, float] = OrderedDict()
+        self._state: dict[str, _DevState] = self._load_state()
+
+    @property
+    def unknown_devices(self) -> list[str]:
+        return list(self._unknown)
+
+    def _load_state(self) -> dict[str, _DevState]:
+        if not self.state_path or not self.state_path.exists():
+            return {}
+        try:
+            raw = json.loads(self.state_path.read_text())
+            # seq is not persisted: after a restart any seq of the current boot is accepted once
+            return {k: _DevState(int(v["boot"]), -1, v["key_fp"]) for k, v in raw.items()}
+        except (ValueError, KeyError, TypeError):
+            log.exception("boot state unreadable, starting empty")
+            return {}
+
+    def _save_state(self) -> None:
+        if not self.state_path:
+            return
+        data = {k: {"boot": v.boot, "key_fp": v.key_fp} for k, v in self._state.items()}
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=self.state_path.parent, prefix=".boot-")
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, self.state_path)
 
     def handle(self, buf: bytes, recv_t: float) -> bool:
         try:
@@ -46,14 +88,17 @@ class IngestService(asyncio.DatagramProtocol):
         key = self.keys.get(dev)
         if key is None:
             self.counters["rejected_unknown"] += 1
-            self.unknown_devices.add(dev)
+            self._unknown[dev] = recv_t
+            self._unknown.move_to_end(dev)
+            while len(self._unknown) > UNKNOWN_MAX:
+                self._unknown.popitem(last=False)
             return False
         try:
             pkt = parse_packet(buf, key)
         except ProtocolError as e:
             self.counters["rejected_hmac" if "hmac" in str(e) else "rejected_malformed"] += 1
             return False
-        if not self._fresh(pkt):
+        if not self._fresh(pkt, _fp(key)):
             self.counters["rejected_replay"] += 1
             return False
         self.counters["accepted"] += 1
@@ -64,20 +109,15 @@ class IngestService(asyncio.DatagramProtocol):
             log.exception("on_packet failed")
         return True
 
-    def _fresh(self, pkt: Packet) -> bool:
+    def _fresh(self, pkt: Packet, key_fp: str) -> bool:
         st = self._state.get(pkt.device_id)
-        if st is None:
-            self._state[pkt.device_id] = _DevState(pkt.boot_id, pkt.seq)
+        if st is None or st.key_fp != key_fp or pkt.boot_id > st.boot:
+            self._state[pkt.device_id] = _DevState(pkt.boot_id, pkt.seq, key_fp)
+            self._save_state()
             return True
-        if pkt.boot_id == st.current_boot:
-            if pkt.seq <= st.last_seq:
-                return False
-            st.last_seq = pkt.seq
-            return True
-        if pkt.boot_id in st.retired:
+        if pkt.boot_id < st.boot or pkt.seq <= st.last_seq:
             return False
-        st.retired.append(st.current_boot)
-        st.current_boot, st.last_seq = pkt.boot_id, pkt.seq
+        st.last_seq = pkt.seq
         return True
 
     # asyncio.DatagramProtocol
