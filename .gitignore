@@ -7,3 +7,6 @@ __pycache__/
 .venv/
 secrets*
 .superpowers/
+.pytest_cache/
+firmware/components/wsn_proto/test/host_test
+firmware/components/wsn_proto/test/golden_bin

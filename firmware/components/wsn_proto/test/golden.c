@@ -1,0 +1,40 @@
+// Emits hex-encoded golden packets for server/tests/test_c_golden.py (one packet per line).
+#include <stdio.h>
+
+#include "hmac_openssl.h"
+#include "wsn_proto.h"
+
+static void hex(const uint8_t *b, int n)
+{
+    for (int i = 0; i < n; i++) printf("%02x", b[i]);
+    putchar('\n');
+}
+
+int main(void)
+{
+    uint8_t key[32];
+    for (int i = 0; i < 32; i++) key[i] = (uint8_t)i;
+    wsn_ctx_t c = {.device_id = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, .boot_id = 0xDEADBEEF, .seq = 7,
+                   .key = key, .key_len = sizeof(key), .hmac = wsn_hmac_openssl};
+
+    static int8_t data[256];
+    for (int j = 0; j < 256; j++) data[j] = (int8_t)j;
+    wsn_csi_frame_t f[5];
+    for (int i = 0; i < 5; i++) {
+        f[i] = (wsn_csi_frame_t){.t_us = 1000000 + i, .rssi = -45, .noise = -92, .sig_mode = 1,
+                                 .cwb = 0, .len = 256, .data = data};
+    }
+    uint8_t out[WSN_MAX_DATAGRAM];
+    int n = wsn_encode_csi(&c, f, 5, out, sizeof(out));
+    if (n < 0) return 1;
+    hex(out, n);
+
+    /* seq is now 8 */
+    wsn_telem_t t = {.csi_hz = 98.5f, .drop_ratio = 0.02f, .rssi_avg = -44, .heap_free = 120000,
+                     .psram_free = 8000000, .uptime_s = 3600, .fw_ver = 1, .model_ver = 0,
+                     .wifi_state = 2};
+    n = wsn_encode_telem(&c, &t, out, sizeof(out));
+    if (n < 0) return 1;
+    hex(out, n);
+    return 0;
+}
