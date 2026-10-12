@@ -47,8 +47,9 @@ def test_two_sessions_same_world(store):
     plan = build_plan(store)
     (room,) = plan["rooms"]  # то же имя — последнее определение
     assert room["name"] == "Кухня"
-    for got, want in zip(room["polygon"], ROOM):
-        assert got == pytest.approx(want, abs=0.01)
+    assert len(room["polygon"]) == len(ROOM)
+    for want in ROOM:  # порядок углов нормализуется обходом, сравниваем как множество
+        assert any(abs(g[0] - want[0]) < 0.01 and abs(g[1] - want[1]) < 0.01 for g in room["polygon"])
     assert plan["router"] == pytest.approx([4.0, 0.0], abs=0.01)
     assert plan["board"] == [0.0, 0.0]
     assert plan["objects"][-1]["xy"] == pytest.approx([2.0, 0.0], abs=0.01)
@@ -67,6 +68,29 @@ def test_session_without_router_skipped(store):
     plan = build_plan(store)
     assert plan["rooms"] == [] and "router" in plan["skipped"][sid]
     assert store.get(sid).plan_ok is False and "router" in store.get(sid).plan_reason
+
+
+def test_unclosed_room_with_unordered_duplicate_corners_is_kept(store):
+    s = store.start_session("walk", DEV, now=100)
+    seq = iter(range(1, 100))
+    ev = lambda kind, **kw: store.append_event({"seq": next(seq), "t": 101, "kind": kind, **kw})  # noqa: E731
+    ev("origin", p=to_xr((0, 0), 0, 0, 0))
+    ev("router", p=to_xr((4, 0), 0, 0, 0))
+    ev("room_new", name="коридор")
+    for c in [(1, 1), (3, -1), (3, 1), (3.05, 1.02), (1, -1)]:  # не по обходу и с дублем, без room_close
+        ev("corner", p=to_xr(c, 0, 0, 0, h=0.0))
+    ev("session_stop")
+    store.stop_session(s.id, now=110)
+    (room,) = build_plan(store)["rooms"]
+    assert room["name"] == "коридор" and len(room["polygon"]) == 4
+
+
+def test_room_tracker_accepts_unordered_corners():
+    rt = RoomTracker()
+    rt.check("room_new", {"name": "A"})
+    for p in ([0, 0, 0], [2, 0, -2], [2, 0, 0], [0, 0, -2]):  # «бабочка» в порядке нажатий
+        assert rt.check("corner", {"p": p}) is None
+    assert rt.check("room_close", {}) is None
 
 
 def test_room_tracker_validates_live():

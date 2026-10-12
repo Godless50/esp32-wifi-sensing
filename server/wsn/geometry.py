@@ -72,6 +72,24 @@ def polygon_valid(pts) -> str | None:
     return None
 
 
+DEDUPE_M = 0.25
+
+
+def normalize_corners(pts) -> list[tuple[float, float]]:
+    """Drop repeated presses (< 25 cm from a kept corner) and order corners by angle around the centroid,
+    so the order in which the user tapped corners does not matter (fine for convex / mildly concave rooms)."""
+    kept: list[tuple[float, float]] = []
+    for p in pts:
+        p = (float(p[0]), float(p[1]))
+        if all(math.dist(p, k) >= DEDUPE_M for k in kept):
+            kept.append(p)
+    if len(kept) < 3:
+        return kept
+    cx = sum(x for x, _ in kept) / len(kept)
+    cy = sum(y for _, y in kept) / len(kept)
+    return sorted(kept, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+
+
 def point_in_polygon(pt, poly) -> bool:
     x, y = pt
     inside = False

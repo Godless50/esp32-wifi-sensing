@@ -19,6 +19,11 @@ def stack(tmp_path):
     (ui / "device" / "index.html").write_text("<!doctype html><title>device</title>")
     (ui / "capture").mkdir()
     (ui / "capture" / "probe.html").write_text("<!doctype html><title>probe</title>")
+    (ui / "capture" / "index.html").write_text("<!doctype html><title>capture</title>")
+    (ui / "scene").mkdir()
+    (ui / "scene" / "index.html").write_text("<!doctype html><title>scene</title>")
+    (ui / "data").mkdir()
+    (ui / "data" / "index.html").write_text("<!doctype html><title>data</title>")
     ks = KeyStore(tmp_path / "k.json")
     ks.set(MAC, KEY)
     hub = LiveHub(decimate_hz=1000.0)
@@ -49,6 +54,14 @@ async def test_device_page(stack):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
         r = await c.get("/device")
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+
+
+@pytest.mark.parametrize("url,marker", [("/capture", "capture"), ("/", "scene"), ("/data", "data")])
+async def test_pages(stack, url, marker):
+    _, _, app = stack
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get(url)
+    assert r.status_code == 200 and marker in r.text
 
 
 async def test_capture_probe_page(stack):

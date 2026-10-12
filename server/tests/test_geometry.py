@@ -42,6 +42,17 @@ def test_polygon_valid(pts, reason):
     assert polygon_valid(pts) == reason
 
 
+def test_normalize_corners_dedupes_and_orders():
+    from wsn.geometry import normalize_corners
+
+    # углы прямоугольника 4×3 в «случайном» порядке + повторные нажатия в одной точке
+    raw = [(0, 0), (4, 3), (0.05, 0.02), (4, 0), (0, 3), (4.1, 3.05)]
+    out = normalize_corners(raw)
+    assert len(out) == 4
+    assert polygon_valid(out) is None
+    assert {(round(x), round(y)) for x, y in out} == {(0, 0), (4, 0), (4, 3), (0, 3)}
+
+
 def test_point_in_polygon():
     sq = [(0, 0), (2, 0), (2, 2), (0, 2)]
     assert point_in_polygon((1, 1), sq) and not point_in_polygon((3, 1), sq)

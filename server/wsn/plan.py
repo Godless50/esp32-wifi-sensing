@@ -6,7 +6,7 @@ import json
 import math
 from pathlib import Path
 
-from .geometry import GeometryError, frame_from_points, polygon_valid, xr_to_floor
+from .geometry import GeometryError, frame_from_points, normalize_corners, polygon_valid, xr_to_floor
 from .store import Store
 
 TRAJ_MIN_DT = 0.2  # 5 Гц
@@ -59,19 +59,28 @@ def build_plan(store: Store) -> dict:
             continue
         router_xy = [round(v, 3) for v in frame.apply(router["p"])]
         current: tuple[str, list] | None = None
+
+        def finish(room) -> None:
+            if room is None:
+                return
+            poly = normalize_corners(room[1])
+            if polygon_valid(poly) is None:
+                rooms[room[0]] = [[round(x, 3), round(y, 3)] for x, y in poly]
+
         for e in events:
             k = e.get("kind")
             if k == "room_new":
+                finish(current)  # незакрытая комната тоже засчитывается, если углов хватает
                 current = (str(e.get("name") or "комната"), [])
             elif k == "corner" and current is not None and e.get("p") is not None:
-                current[1].append([round(v, 3) for v in frame.apply(e["p"])])
+                current[1].append(frame.apply(e["p"]))
             elif k == "room_close" and current is not None:
-                if polygon_valid(current[1]) is None:
-                    rooms[current[0]] = current[1]
+                finish(current)
                 current = None
             elif k == "object" and e.get("p") is not None:
                 objects.append({"type": e.get("type", "другое"), "xy": [round(v, 3) for v in frame.apply(e["p"])],
                                 "size": e.get("size") or [0.5, 0.5, 0.8], "session": s.id})
+        finish(current)
         traj, last_t = [], -math.inf
         for p in _read_jsonl(d / "pose.jsonl"):
             if p.get("p") is None or p["t"] - last_t < TRAJ_MIN_DT - 1e-9:
@@ -121,7 +130,7 @@ class RoomTracker:
         elif kind == "room_close":
             if self.corners is None:
                 return ("no_room", "no open room")
-            problem = polygon_valid(self.corners)
+            problem = polygon_valid(normalize_corners(self.corners))
             if problem:
                 return ("bad_polygon", problem)
             self.corners = None

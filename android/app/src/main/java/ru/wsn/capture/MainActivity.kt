@@ -74,6 +74,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var transport: Transport? = null
     private var roomOpen: String? = null
     private var roomCorners = 0
+    private var lastCorner: FloatArray? = null
     private val logLines = ArrayDeque<String>()
 
     private fun nowMs(): Double = SystemClock.elapsedRealtimeNanos() / 1e6
@@ -222,7 +223,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 var hp: FloatArray? = null
                 for (hit in frame.hitTest(viewW / 2f, viewH * 0.45f)) {
                     val tr = hit.trackable
-                    if (tr is Plane && tr.isPoseInPolygon(hit.hitPose) && tr.type == Plane.Type.HORIZONTAL_UPWARD_FACING) {
+                    if (tr is Plane && tr.isPoseInPolygon(hit.hitPose) && tr.type == Plane.Type.HORIZONTAL_UPWARD_FACING &&
+                        hit.distance <= MAX_HIT_M) {  // дальние точки пола неточны и уводят угол в соседнюю комнату
                         hp = hit.hitPose.translation; break
                     }
                 }
@@ -253,13 +255,20 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             "router" -> needPose()?.let { client.event("router", JSONObject().put("p", it)); log("Роутер отмечен.") }
             "room" -> {
                 val name = roomName.text.toString().trim().ifEmpty { "Комната ${logLines.size}" }
-                client.event("room_new", JSONObject().put("name", name)); roomOpen = name; roomCorners = 0
+                client.event("room_new", JSONObject().put("name", name)); roomOpen = name; roomCorners = 0; lastCorner = null
                 log("Комната «$name»: отмечайте углы на полу.")
             }
             "corner" -> {
                 val h = hitPos
                 val (p, src) = if (h != null) JSONArray(h.map { it.toDouble() }) to "hit"
                 else (needPose()?.also { it.put(1, 0.0) } ?: return) to "phone"
+                val xz = floatArrayOf(p.getDouble(0).toFloat(), p.getDouble(2).toFloat())
+                lastCorner?.let {
+                    if (kotlin.math.hypot(xz[0] - it[0], xz[1] - it[1]) < MIN_CORNER_GAP_M) {
+                        log("Этот угол уже отмечен — перейдите к следующему.", true); return
+                    }
+                }
+                lastCorner = xz
                 client.event("corner", JSONObject().put("p", p).put("source", src)); roomCorners++
                 log("Угол $roomCorners${if (src == "phone") " (по телефону)" else ""}.")
             }
@@ -380,6 +389,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     companion object {
         const val DEFAULT_URL = "wss://192.168.4.77:8443/ws/capture"
         const val POSE_HZ = 30
+        const val MAX_HIT_M = 4.0f
+        const val MIN_CORNER_GAP_M = 0.25f
         val DURATIONS = listOf(300, 600, 1200, 1800)
         val OBJECTS = listOf("стол", "диван", "кровать", "шкаф", "дверь", "другое")
         val SIZES = mapOf(
