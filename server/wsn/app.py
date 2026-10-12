@@ -60,5 +60,9 @@ def create_app(hub: LiveHub, ingest: IngestService, ui_dir: Path, udp_port: int 
     def device_page() -> FileResponse:
         return FileResponse(ui_dir / "device" / "index.html", media_type="text/html")
 
+    @app.get("/capture/probe")
+    def capture_probe_page() -> FileResponse:
+        return FileResponse(ui_dir / "capture" / "probe.html", media_type="text/html")
+
     app.mount("/static", StaticFiles(directory=ui_dir), name="static")
     return app

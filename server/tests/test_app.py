@@ -17,6 +17,8 @@ def stack(tmp_path):
     ui = tmp_path / "ui"
     (ui / "device").mkdir(parents=True)
     (ui / "device" / "index.html").write_text("<!doctype html><title>device</title>")
+    (ui / "capture").mkdir()
+    (ui / "capture" / "probe.html").write_text("<!doctype html><title>probe</title>")
     ks = KeyStore(tmp_path / "k.json")
     ks.set(MAC, KEY)
     hub = LiveHub(decimate_hz=1000.0)
@@ -47,6 +49,13 @@ async def test_device_page(stack):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
         r = await c.get("/device")
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+
+
+async def test_capture_probe_page(stack):
+    _, _, app = stack
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/capture/probe")
+    assert r.status_code == 200 and "probe" in r.text
 
 
 def test_ws_live_receives_amp(stack):

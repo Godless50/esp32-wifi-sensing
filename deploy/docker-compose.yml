@@ -17,5 +17,19 @@ services:
       - ../ui:/ui:ro
     ports:
       - "5005:5005/udp"
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"   # снаружи только через caddy (TLS + пароль)
     restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    env_file: ../data/caddy.env   # WSN_HOST, WSN_UI_HASH — создаёт tools/ui_password.sh
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    ports:
+      - "8443:8443"
+    depends_on: [api]
+    restart: unless-stopped
+
+volumes:
+  caddy_data:

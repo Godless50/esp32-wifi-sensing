@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Проба WebXR</title>
+<style>
+  :root { --bg:#0f1216; --panel:#171b21; --line:#262c35; --text:#e6e9ee; --muted:#8a93a1; --ok:#3fb68b; --bad:#e0564f; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f5f6f8; --panel:#fff; --line:#dde1e7; --text:#1b1f24; --muted:#5f6873; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--text); font:16px/1.45 system-ui,sans-serif; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  td { padding:6px 0; border-bottom:1px solid var(--line); vertical-align:top; }
+  td:first-child { color:var(--muted); width:45%; }
+  .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; }
+  button { width:100%; margin-top:16px; padding:16px; font-size:18px; border-radius:10px; border:0; background:#2f6fde; color:#fff; }
+  button:disabled { background:#555; }
+  #overlay { position:fixed; inset:auto 0 0 0; padding:12px 16px; background:rgba(0,0,0,.6); color:#fff; font:15px/1.4 ui-monospace,monospace; }
+  #overlay button { margin-top:8px; padding:12px; }
+</style>
+</head>
+<body>
+<h1>Проба WebXR для съёмки квартиры</h1>
+<table>
+  <tr><td>Безопасный контекст (HTTPS)</td><td id="secure">…</td></tr>
+  <tr><td>navigator.xr</td><td id="xr">…</td></tr>
+  <tr><td>immersive-ar</td><td id="ar">…</td></tr>
+  <tr><td>Браузер</td><td id="ua"></td></tr>
+</table>
+<button id="start" disabled>Старт AR-сессии</button>
+<div id="overlay" hidden>
+  <div id="pose">поза: —</div>
+  <div id="hit">пол: —</div>
+  <div id="fps">кадров/с: —</div>
+  <button id="stop">Стоп</button>
+</div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const mark = (id, ok, text) => { $(id).textContent = text; $(id).className = ok ? "ok" : "bad"; };
+$("ua").textContent = navigator.userAgent;
+mark("secure", window.isSecureContext, window.isSecureContext ? "да" : "нет — установите сертификат /ca.crt");
+let session = null;
+
+async function probe() {
+  if (!navigator.xr) { mark("xr", false, "нет"); mark("ar", false, "—"); return; }
+  mark("xr", true, "есть");
+  try {
+    const ok = await navigator.xr.isSessionSupported("immersive-ar");
+    mark("ar", ok, ok ? "поддерживается" : "не поддерживается");
+    $("start").disabled = !ok;
+  } catch (e) { mark("ar", false, "ошибка: " + e.message); }
+}
+
+async function start() {
+  try {
+    session = await navigator.xr.requestSession("immersive-ar", {
+      requiredFeatures: ["local-floor", "hit-test"],
+      optionalFeatures: ["dom-overlay"],
+      domOverlay: { root: $("overlay") },
+    });
+  } catch (e) { alertLine("не удалось запустить: " + e.message); return; }
+  $("overlay").hidden = false;
+  const canvas = document.createElement("canvas");
+  const gl = canvas.getContext("webgl", { xrCompatible: true });
+  session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+  const floor = await session.requestReferenceSpace("local-floor");
+  const viewer = await session.requestReferenceSpace("viewer");
+  const hitSource = await session.requestHitTestSource({ space: viewer });
+  let frames = 0, t0 = performance.now();
+  session.addEventListener("end", () => { $("overlay").hidden = true; session = null; });
+  const onFrame = (t, frame) => {
+    session.requestAnimationFrame(onFrame);
+    const pose = frame.getViewerPose(floor);
+    if (pose) {
+      const p = pose.transform.position;
+      $("pose").textContent = `поза: x=${p.x.toFixed(2)} y=${p.y.toFixed(2)} z=${p.z.toFixed(2)} м`;
+    }
+    const hits = frame.getHitTestResults(hitSource);
+    if (hits.length) {
+      const hp = hits[0].getPose(floor).transform.position;
+      $("hit").textContent = `пол/поверхность: x=${hp.x.toFixed(2)} y=${hp.y.toFixed(2)} z=${hp.z.toFixed(2)}`;
+    } else {
+      $("hit").textContent = "пол: не найден (поводите телефоном)";
+    }
+    frames++;
+    if (t - t0 > 1000) { $("fps").textContent = `кадров/с: ${frames}`; frames = 0; t0 = t; }
+  };
+  session.requestAnimationFrame(onFrame);
+}
+
+function alertLine(text) { const d = document.createElement("p"); d.className = "bad"; d.textContent = text; document.body.append(d); }
+$("start").onclick = start;
+$("stop").onclick = () => session && session.end();
+probe();
+</script>
+</body>
+</html>

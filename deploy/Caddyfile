@@ -1,0 +1,24 @@
+{
+	admin off
+	auto_https disable_redirects
+	default_sni {$WSN_HOST}
+}
+
+https://{$WSN_HOST}:8443 {
+	tls internal
+
+	# Корневой сертификат локального CA — для установки на телефон (без авторизации).
+	handle /ca.crt {
+		root * /data/caddy/pki/authorities/local
+		rewrite * /root.crt
+		header Content-Type application/x-x509-ca-cert
+		file_server
+	}
+
+	handle {
+		basic_auth {
+			wsn {$WSN_UI_HASH}
+		}
+		reverse_proxy api:8080
+	}
+}
