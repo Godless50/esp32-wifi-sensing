@@ -39,9 +39,16 @@ def _fp(key: bytes) -> str:
 
 
 class IngestService(asyncio.DatagramProtocol):
-    def __init__(self, keys: KeyStore, on_packet: Callable[[Packet, float], None], state_path: Path | None = None):
+    def __init__(
+        self,
+        keys: KeyStore,
+        on_packet: Callable[[Packet, float], None],
+        state_path: Path | None = None,
+        on_raw: Callable[[bytes, str, float], None] | None = None,
+    ):
         self.keys = keys
         self.on_packet = on_packet
+        self.on_raw = on_raw
         self.state_path = Path(state_path) if state_path else None
         self.counters: dict[str, int] = {
             "accepted": 0,
@@ -102,11 +109,14 @@ class IngestService(asyncio.DatagramProtocol):
             self.counters["rejected_replay"] += 1
             return False
         self.counters["accepted"] += 1
-        try:
-            self.on_packet(pkt, recv_t)
-        except Exception:  # потребитель не должен ронять приём
-            self.counters["callback_errors"] += 1
-            log.exception("on_packet failed")
+        for cb, args in ((self.on_raw, (buf, pkt.device_id, recv_t)), (self.on_packet, (pkt, recv_t))):
+            if cb is None:
+                continue
+            try:
+                cb(*args)
+            except Exception:  # потребитель не должен ронять приём
+                self.counters["callback_errors"] += 1
+                log.exception("ingest consumer failed")
         return True
 
     def _fresh(self, pkt: Packet, key_fp: str) -> bool:

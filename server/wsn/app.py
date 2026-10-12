@@ -5,32 +5,63 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from .ingest import IngestService
 from .live import LiveHub
+from .recorder import Recorder
+from .store import SessionBusy, SessionNotFound, Store
 
 log = logging.getLogger(__name__)
+TICK_S = 5.0
 
 
-def create_app(hub: LiveHub, ingest: IngestService, ui_dir: Path, udp_port: int | None = None) -> FastAPI:
+class StartSession(BaseModel):
+    kind: str
+    device_id: str
+    duration_s: float | None = None
+
+
+def create_app(
+    hub: LiveHub,
+    ingest: IngestService,
+    ui_dir: Path,
+    udp_port: int | None = None,
+    store: Store | None = None,
+    recorder: Recorder | None = None,
+) -> FastAPI:
     ui_dir = Path(ui_dir)
+
+    async def ticker() -> None:
+        while True:
+            await asyncio.sleep(TICK_S)
+            try:
+                recorder.tick(time.monotonic())
+            except Exception:
+                log.exception("recorder tick failed")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         transport = None
+        tasks = []
         if udp_port is not None:
             loop = asyncio.get_running_loop()
             transport, _ = await loop.create_datagram_endpoint(lambda: ingest, local_addr=("0.0.0.0", udp_port))
             log.info("UDP ingest on :%d", udp_port)
+        if recorder is not None:
+            tasks.append(asyncio.create_task(ticker()))
         try:
             yield
         finally:
+            for t in tasks:
+                t.cancel()
             if transport is not None:
                 transport.close()
 
@@ -44,6 +75,42 @@ def create_app(hub: LiveHub, ingest: IngestService, ui_dir: Path, udp_port: int 
             "counters": dict(ingest.counters),
         }
 
+    def _store() -> Store:
+        if store is None:
+            raise HTTPException(503, "sessions disabled")
+        return store
+
+    @app.post("/api/sessions")
+    def start_session(req: StartSession) -> dict:
+        try:
+            info = _store().start_session(req.kind, req.device_id, time.monotonic(), req.duration_s)
+        except SessionBusy as e:
+            raise HTTPException(409, f"session {e} is active") from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        return dataclasses.asdict(info)
+
+    @app.post("/api/sessions/{sid}/stop")
+    def stop_session(sid: str) -> dict:
+        try:
+            return dataclasses.asdict(_store().stop_session(sid, time.monotonic()))
+        except SessionNotFound as e:
+            raise HTTPException(404, "no such session") from e
+
+    @app.get("/api/sessions")
+    def list_sessions() -> list[dict]:
+        return [dataclasses.asdict(s) for s in _store().list_sessions()]
+
+    @app.delete("/api/sessions/{sid}")
+    def delete_session(sid: str) -> dict:
+        try:
+            _store().delete_session(sid)
+        except SessionBusy as e:
+            raise HTTPException(409, "stop the session first") from e
+        except SessionNotFound as e:
+            raise HTTPException(404, "no such session") from e
+        return {"deleted": sid}
+
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket) -> None:
         sub = hub.subscribe()  # до accept: клиент не пропустит первые сообщения
@@ -56,13 +123,13 @@ def create_app(hub: LiveHub, ingest: IngestService, ui_dir: Path, udp_port: int 
         finally:
             sub.close()
 
-    @app.get("/device")
-    def device_page() -> FileResponse:
-        return FileResponse(ui_dir / "device" / "index.html", media_type="text/html")
+    def page(rel: str):
+        def handler() -> FileResponse:
+            return FileResponse(ui_dir / rel, media_type="text/html")
+        return handler
 
-    @app.get("/capture/probe")
-    def capture_probe_page() -> FileResponse:
-        return FileResponse(ui_dir / "capture" / "probe.html", media_type="text/html")
+    app.get("/device")(page("device/index.html"))
+    app.get("/capture/probe")(page("capture/probe.html"))
 
     app.mount("/static", StaticFiles(directory=ui_dir), name="static")
     return app

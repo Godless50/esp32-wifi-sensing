@@ -10,6 +10,8 @@ from .app import create_app
 from .ingest import IngestService
 from .keys import KeyStore
 from .live import LiveHub
+from .recorder import Recorder
+from .store import Store
 
 
 def main() -> None:
@@ -20,8 +22,10 @@ def main() -> None:
     ui = Path(os.environ.get("WSN_UI", "/ui"))
     keys = KeyStore(data / "device_keys.json")
     hub = LiveHub()
-    ingest = IngestService(keys, hub.on_packet, state_path=data / "boot_state.json")
-    app = create_app(hub, ingest, ui, udp_port=udp_port)
+    store = Store(data / "wsn.db", data / "sessions")
+    recorder = Recorder(store)
+    ingest = IngestService(keys, hub.on_packet, state_path=data / "boot_state.json", on_raw=recorder.on_datagram)
+    app = create_app(hub, ingest, ui, udp_port=udp_port, store=store, recorder=recorder)
     uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
 
 
