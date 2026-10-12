@@ -113,3 +113,45 @@ async def test_subscription_iterates_and_closes():
     assert msg["type"] == "amp"
     sub.close()
     assert hub.subscriber_count() == 0
+
+
+def test_motion_energy_constant_is_zero():
+    from wsn.live import motion_energy
+    assert motion_energy(np.full((100, 64), 20.0, dtype=np.float32)) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_motion_energy_unit_noise_is_one():
+    from wsn.live import motion_energy
+    rng = np.random.default_rng(1)
+    assert motion_energy(20.0 + rng.normal(0, 1, (100, 64))) == pytest.approx(1.0, rel=0.1)
+
+
+def test_motion_energy_ignores_null_subcarriers_and_short_windows():
+    from wsn.live import motion_energy
+    rng = np.random.default_rng(2)
+    a = 20.0 + rng.normal(0, 1, (100, 64))
+    a[:, :6] = 0.0  # защитные/DC поднесущие без сигнала
+    assert motion_energy(a) == pytest.approx(1.0, rel=0.1)
+    assert motion_energy(a[:1]) == 0.0
+
+
+def noisy_frame(rng, sigma):
+    iq = np.clip(np.round(rng.normal(20, sigma, 256)), -127, 127).astype(np.int8)
+    return frame(data=iq.tobytes())
+
+
+async def test_motion_rate_and_normalisation():
+    hub = LiveHub(decimate_hz=1.0)  # мало amp-сообщений, чтобы очередь клиента не переполнилась
+    sub = hub.subscribe()
+    rng = np.random.default_rng(3)
+    for i in range(1000):  # 10 с покоя при 100 Гц
+        hub.on_packet(csi_packet(i, [noisy_frame(rng, 1.0)]), i * 0.01)
+    msgs = []
+    while not sub.queue.empty():
+        msgs.append(sub.queue.get_nowait())
+    motion = [m for m in msgs if m["type"] == "motion"]
+    assert 38 <= len(motion) <= 41  # 4 Гц
+    gaps = np.diff([m["t"] for m in motion])
+    assert gaps.min() >= 0.25 - 1e-9
+    assert motion[-1]["device_id"] == MAC
+    assert motion[-1]["energy"] == pytest.approx(1.0, rel=0.25)  # в покое ≈ 1

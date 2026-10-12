@@ -37,6 +37,30 @@ def ltf_amplitude(data: bytes, part: Literal["lltf", "ht"]) -> np.ndarray | None
     return amp[_REORDER]
 
 
+MOTION_WINDOW_S = 1.0
+MOTION_PERIOD_S = 0.25  # 4 Гц
+MOTION_BASELINE_S = 60.0
+_NULL_AMP = 1.0  # поднесущие без сигнала (защитные, DC) не учитываются
+
+
+def motion_energy(amps: np.ndarray) -> float:
+    """Mean over live subcarriers of the temporal std of amplitude. amps: [T, 64]."""
+    a = np.asarray(amps, dtype=np.float32)
+    if a.ndim != 2 or a.shape[0] < 2:
+        return 0.0
+    live = a.mean(axis=0) > _NULL_AMP
+    if not live.any():
+        return 0.0
+    return float(a[:, live].std(axis=0).mean())
+
+
+class _Motion:
+    def __init__(self):
+        self.window: deque = deque()  # (t, amp[64])
+        self.baseline: deque = deque()  # (t, raw)
+        self.last_emit = -1e9
+
+
 @dataclass
 class DeviceStats:
     device_id: str
@@ -98,6 +122,7 @@ class LiveHub:
         self._times: dict[str, deque] = {}
         self._last_emit: dict[str, float] = {}
         self._subs: set[Subscription] = set()
+        self._motion: dict[str, _Motion] = {}
 
     def subscribe(self) -> Subscription:
         sub = Subscription(self)
@@ -138,6 +163,7 @@ class LiveHub:
             times.popleft()
         st.csi_hz = len(times) / _HZ_WINDOW_S
         st.counters["frames"] += len(p.frames)
+        self._motion_update(p, recv_t)
         last = p.frames[-1]
         st.rssi = last.rssi
         if recv_t - self._last_emit.get(p.device_id, -1e9) < self.min_interval - 1e-9:
@@ -148,6 +174,33 @@ class LiveHub:
         self._last_emit[p.device_id] = recv_t
         self._broadcast({"type": "amp", "device_id": p.device_id, "t": recv_t, "rssi": last.rssi,
                          "sig_mode": last.sig_mode, "amp": [round(float(x), 1) for x in amp]})
+
+    def _motion_update(self, p: Packet, recv_t: float) -> None:
+        m = self._motion.get(p.device_id)
+        if m is None:
+            m = self._motion[p.device_id] = _Motion()
+        for f in p.frames:
+            if len(f.data) >= 256:  # только HT-LTF: L-LTF и HT не смешиваем
+                amp = ltf_amplitude(f.data, "ht")
+                if amp is not None:
+                    m.window.append((recv_t, amp))
+        while m.window and m.window[0][0] <= recv_t - MOTION_WINDOW_S:
+            m.window.popleft()
+        if recv_t - m.last_emit < MOTION_PERIOD_S - 1e-9 or len(m.window) < 2:
+            return
+        m.last_emit = recv_t
+        raw = motion_energy(np.stack([a for _, a in m.window]))
+        m.baseline.append((recv_t, raw))
+        while m.baseline and m.baseline[0][0] <= recv_t - MOTION_BASELINE_S:
+            m.baseline.popleft()
+        med = float(np.median([r for _, r in m.baseline]))
+        energy = raw / med if med > 1e-6 else 0.0
+        self._broadcast({"type": "motion", "device_id": p.device_id, "t": recv_t,
+                         "energy": round(energy, 3), "raw": round(raw, 3)})
+
+    def publish(self, msg: dict) -> None:
+        """Send an arbitrary message (e.g. live phone position) to all live subscribers."""
+        self._broadcast(msg)
 
     def _broadcast(self, msg: dict) -> None:
         try:

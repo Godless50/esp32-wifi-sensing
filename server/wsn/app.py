@@ -19,6 +19,7 @@ from typing import Callable
 from .capture import CaptureProtocol
 from .ingest import IngestService
 from .live import LiveHub
+from .geometry import GeometryError, frame_from_points
 from .plan import RoomTracker, build_plan
 from .recorder import Recorder
 from .store import SessionBusy, SessionNotFound, Store
@@ -43,8 +44,25 @@ def create_app(
     default_device: Callable[[], str | None] | None = None,
 ) -> FastAPI:
     ui_dir = Path(ui_dir)
+    tracker = RoomTracker()
+    phone_last = {"t": -1e9}
+
+    def publish_phone(msg: dict) -> None:
+        """Живая позиция телефона в системе плана (если в сессии уже отмечены плата и роутер), ≤4 Гц."""
+        items = [it for it in (msg.get("items") or []) if isinstance(it, dict) and it.get("p")]
+        now = time.monotonic()
+        if not items or tracker.origin is None or tracker.router is None or now - phone_last["t"] < 0.25:
+            return
+        try:
+            frame = frame_from_points(tracker.origin, tracker.router)
+            x, y = frame.apply(items[-1]["p"])
+        except (GeometryError, TypeError, ValueError, IndexError):
+            return
+        phone_last["t"] = now
+        hub.publish({"type": "phone", "t": now, "xy": [round(x, 3), round(y, 3)]})
+
     capture = (
-        CaptureProtocol(store, recorder, default_device or (lambda: None), validate_event=RoomTracker().check)
+        CaptureProtocol(store, recorder, default_device or (lambda: None), validate_event=tracker.check)
         if store is not None and recorder is not None
         else None
     )
@@ -154,8 +172,11 @@ def create_app(
                 if msg is not None:
                     if msg.get("type") == "hello" and msg.get("client_id"):
                         cid = str(msg["client_id"])[:64]
-                    for reply in capture.on_message(cid, msg):
+                    replies = capture.on_message(cid, msg)
+                    for reply in replies:
                         await ws.send_json(reply)
+                    if msg.get("type") == "poses" and not any(r.get("type") == "error" for r in replies):
+                        publish_phone(msg)
                 if time.monotonic() - last_state >= 1.0:
                     last_state = time.monotonic()
                     st = capture.state(cid)
