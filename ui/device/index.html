@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Плата CSI</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --line: #262c35; --text: #e6e9ee; --muted: #8a93a1;
+    --ok: #3fb68b; --warn: #e0a43a; --bad: #e0564f; --accent: #5aa2ff;
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f6f8; --panel: #ffffff; --line: #dde1e7; --text: #1b1f24; --muted: #5f6873;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) { --bg: #f5f6f8; --panel: #ffffff; --line: #dde1e7; --text: #1b1f24; --muted: #5f6873; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; font-weight: 600; }
+  select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  #conn { margin-left: auto; font-size: 12px; color: var(--muted); }
+  #conn.bad { color: var(--bad); font-weight: 600; }
+  main { padding: 16px; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) 320px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  #wf { width: 100%; height: 420px; image-rendering: pixelated; display: block; border-radius: 4px; background: #000; }
+  .axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .card { border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  .card .k { color: var(--muted); font-size: 11px; }
+  .card .v { font-size: 18px; font-variant-numeric: tabular-nums; }
+  .warn { color: var(--warn); }
+  .bad { color: var(--bad); }
+  .okc { color: var(--ok); }
+  #warnings:empty { display: none; }
+  #warnings { margin-top: 8px; padding: 8px; border: 1px solid var(--warn); border-radius: 6px; color: var(--warn); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td { padding: 2px 0; border-bottom: 1px solid var(--line); }
+  td:last-child { text-align: right; }
+  .empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Плата CSI</h1>
+  <label>Устройство <select id="dev"><option value="">— нет данных —</option></select></label>
+  <span id="conn">подключение…</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Амплитуды поднесущих, последние 10 с (сверху — новые)</h2>
+    <canvas id="wf" width="64" height="200"></canvas>
+    <div class="axis"><span>−32</span><span>0</span><span>+31</span></div>
+    <div class="axis"><span id="scale">шкала: —</span><span id="sig"></span></div>
+  </section>
+  <aside>
+    <section class="panel">
+      <h2>Состояние</h2>
+      <div class="cards">
+        <div class="card"><div class="k">CSI Гц, сервер</div><div class="v" id="hz_srv">—</div></div>
+        <div class="card"><div class="k">CSI Гц, плата</div><div class="v" id="hz_dev">—</div></div>
+        <div class="card"><div class="k">RSSI</div><div class="v" id="rssi">—</div></div>
+        <div class="card"><div class="k">Отброшено</div><div class="v" id="drop">—</div></div>
+        <div class="card"><div class="k">Wi-Fi</div><div class="v" id="wifi">—</div></div>
+        <div class="card"><div class="k">Аптайм</div><div class="v" id="uptime">—</div></div>
+        <div class="card"><div class="k">Heap / PSRAM, КБ</div><div class="v" id="mem">—</div></div>
+        <div class="card"><div class="k">Прошивка / модель</div><div class="v" id="ver">—</div></div>
+      </div>
+      <div id="warnings"></div>
+    </section>
+    <section class="panel" style="margin-top:16px">
+      <h2>Приём пакетов</h2>
+      <table id="counters"></table>
+    </section>
+    <section class="panel" style="margin-top:16px">
+      <h2>Неизвестные устройства</h2>
+      <div id="unknown" class="empty">нет</div>
+    </section>
+  </aside>
+</main>
+<script src="/static/device/device.js"></script>
+</body>
+</html>

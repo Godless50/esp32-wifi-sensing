@@ -6,6 +6,7 @@ services:
       dockerfile: deploy/Dockerfile.server
     image: wsn-server
     command: ["python", "-m", "wsn"]
+    user: "${WSN_UID:-1000}:${WSN_GID:-1000}"  # файлы в data/ принадлежат пользователю хоста
     environment:
       WSN_UDP_PORT: "5005"
       WSN_HTTP_PORT: "8080"
