@@ -68,6 +68,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     @Volatile private var lastRot: FloatArray? = null
     @Volatile private var tracking: TrackingState = TrackingState.STOPPED
     @Volatile private var hitPos: FloatArray? = null
+    @Volatile private var floorY: Float? = null
     private var lastPoseMs = 0.0
 
     private lateinit var client: CaptureClient
@@ -227,19 +228,53 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                     lastPoseMs = t
                     main.post { client.addPose(t, p, q) }
                 }
-                var hp: FloatArray? = null
-                for (hit in frame.hitTest(viewW / 2f, viewH * 0.45f)) {
-                    val tr = hit.trackable
-                    if (tr is Plane && tr.isPoseInPolygon(hit.hitPose) && tr.type == Plane.Type.HORIZONTAL_UPWARD_FACING &&
-                        hit.distance <= MAX_HIT_M) {  // дальние точки пола неточны и уводят угол в соседнюю комнату
-                        hp = hit.hitPose.translation; break
+                // Высота пола — самая низкая найденная горизонтальная плоскость (столы и диван выше).
+                var fy: Float? = null
+                for (pl in s.getAllTrackables(Plane::class.java)) {
+                    if (pl.trackingState == TrackingState.TRACKING && pl.type == Plane.Type.HORIZONTAL_UPWARD_FACING &&
+                        pl.extentX * pl.extentZ >= 0.25f && p[1] - pl.centerPose.ty() > 0.5f) {
+                        val y = pl.centerPose.ty()
+                        if (fy == null || y < fy) fy = y
                     }
                 }
-                hitPos = hp
+                floorY = fy
+                // Луч прицела продлеваем до бесконечной плоскости пола: у стен и в углах ARCore пол не размечает,
+                // а точка «стык пола и стены» нужна именно там.
+                hitPos = fy?.let { floorRayHit(cam, it) }
             }
         } catch (e: Exception) {
             main.post { log("AR: ${e.javaClass.simpleName}", true) }
         }
+    }
+
+    private val projM = FloatArray(16)
+    private val viewM = FloatArray(16)
+    private val pvM = FloatArray(16)
+    private val invM = FloatArray(16)
+
+    /** Точка пересечения луча через прицел (центр по X, 45 % высоты) с плоскостью y = floorY, или null. */
+    private fun floorRayHit(cam: com.google.ar.core.Camera, floorY: Float): FloatArray? {
+        cam.getProjectionMatrix(projM, 0, 0.05f, 100f)
+        cam.getViewMatrix(viewM, 0)
+        android.opengl.Matrix.multiplyMM(pvM, 0, projM, 0, viewM, 0)
+        if (!android.opengl.Matrix.invertM(invM, 0, pvM, 0)) return null
+        val ndcY = 1f - 2f * 0.45f
+        val near = unproject(0f, ndcY, -1f)
+        val far = unproject(0f, ndcY, 1f)
+        val dx = far[0] - near[0]; val dy = far[1] - near[1]; val dz = far[2] - near[2]
+        if (dy > -1e-4f) return null  // луч не смотрит вниз
+        val t = (floorY - near[1]) / dy
+        val hx = near[0] + dx * t; val hz = near[2] + dz * t
+        val o = cam.pose.translation
+        if (kotlin.math.hypot(hx - o[0], hz - o[2]) > MAX_HIT_M) return null  // дальше 4 м по полу — неточно
+        return floatArrayOf(hx, floorY, hz)
+    }
+
+    private fun unproject(x: Float, y: Float, z: Float): FloatArray {
+        val v = floatArrayOf(x, y, z, 1f)
+        val r = FloatArray(4)
+        android.opengl.Matrix.multiplyMV(r, 0, invM, 0, v, 0)
+        return floatArrayOf(r[0] / r[3], r[1] / r[3], r[2] / r[3])
     }
 
     // ---------------- actions ----------------
@@ -264,15 +299,24 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             "origin" -> needPose()?.let { client.event("origin", JSONObject().put("p", it)); hasOrigin = true; log("Плата отмечена.") }
             "router" -> needPose()?.let { client.event("router", JSONObject().put("p", it)); hasRouter = true; log("Роутер отмечен.") }
             "room" -> {
+                // без обеих отметок план из записи не строится — лучше остановить сразу, чем после обхода
+                if (!hasOrigin || !hasRouter) {
+                    log("Сначала отметьте ${listOfNotNull(if (!hasOrigin) "«Я у платы»" else null, if (!hasRouter) "«Я у роутера»" else null).joinToString(" и ")} (в любом порядке).", true)
+                    return
+                }
                 val name = roomName.text.toString().trim().ifEmpty { "Комната ${roomsStarted + 1}" }
                 if (name == roomOpen) { log("Комната «$name» уже открыта — отмечайте углы.", true); return }
                 client.event("room_new", JSONObject().put("name", name)); roomOpen = name; roomCorners = 0; lastCorner = null; roomsStarted++
                 log("Комната «$name»: отмечайте углы на полу.")
             }
             "corner" -> {
-                val h = hitPos
-                val (p, src) = if (h != null) JSONArray(h.map { it.toDouble() }) to "hit"
-                else (needPose()?.also { it.put(1, 0.0) } ?: return) to "phone"
+                // Только по прицелу: угол «по позиции телефона» ошибается до метра и портит план.
+                val h = hitPos ?: run {
+                    log(if (floorY == null) "Пол не найден: поводите телефоном над полом посреди комнаты." else
+                        "Наведите прицел на стык пола и стены ближе 4 м — кружок станет белым.", true)
+                    return
+                }
+                val p = JSONArray(h.map { it.toDouble() }); val src = "hit"
                 val xz = floatArrayOf(p.getDouble(0).toFloat(), p.getDouble(2).toFloat())
                 lastCorner?.let {
                     if (kotlin.math.hypot(xz[0] - it[0], xz[1] - it[1]) < MIN_CORNER_GAP_M) {
@@ -281,7 +325,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 }
                 lastCorner = xz
                 client.event("corner", JSONObject().put("p", p).put("source", src)); roomCorners++
-                log("Угол $roomCorners${if (src == "phone") " (по телефону)" else ""}.")
+                log("Угол $roomCorners отмечен.")
             }
             "close" -> {
                 val r = roomOpen ?: run { log("Комната уже закрыта.", true); return }
