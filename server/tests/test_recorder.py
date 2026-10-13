@@ -42,6 +42,9 @@ def test_records_only_active_device_and_session(rig):
     store.stop_session(s.id, now=3.0)
     recs = read_csi_bin(store.session_dir(s.id) / "csi.bin")
     assert len(recs) == 1 and recs[0][1] == pkt(1)
+    # все платы сессии — в csi_all.bin (отметки описывают всю квартиру)
+    allr = read_csi_bin(store.session_dir(s.id) / "csi_all.bin")
+    assert [b for _, b in allr] == [pkt(1), pkt(0, mac=OTHER)]
 
 
 def test_idle_timeout(rig):

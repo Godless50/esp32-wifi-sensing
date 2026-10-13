@@ -4,6 +4,10 @@ Chunks go to the address the board sends its CSI from, signed with the board key
 id. The board stores them in order and reports how many bytes it has (WSN_TYPE_MODEL_ACK); the pusher always
 resumes from that point, so lost datagrams are simply sent again. Done when the board reports "activating"
 (it then restarts) or its telemetry already shows the new model version.
+
+The same channel carries a firmware image (ESP app .bin): its version has bit 31 set and equals the board's
+firmware id (bit 31 + the first 3 bytes of the image's ELF SHA256, telemetry field fw_ver). The board writes it into
+the other OTA app partition, checks it, boots it and confirms it only after reaching Wi-Fi (else it rolls back).
 """
 
 from __future__ import annotations
@@ -20,6 +24,17 @@ log = logging.getLogger(__name__)
 WINDOW = 8          # кусков подряд, потом ждём подтверждения
 ACK_WAIT_S = 0.6
 TIMEOUT_S = 180.0
+FW_TIMEOUT_S = 900.0
+FW_FLAG = 0x80000000
+APP_DESC_MAGIC = b"\x32\x54\xcd\xab"  # esp_app_desc_t, сразу после заголовков образа (смещение 0x20)
+
+
+def firmware_id(blob: bytes) -> int | None:
+    """Firmware id of an ESP app image (same as wsn_fw_id() on the board), None when blob is not an app image."""
+    if len(blob) < 0x100 or blob[0] != 0xE9 or blob[0x20:0x24] != APP_DESC_MAGIC:
+        return None
+    sha = blob[0x20 + 144: 0x20 + 147]
+    return FW_FLAG | (sha[0] << 16) | (sha[1] << 8) | sha[2]
 
 
 @dataclass
@@ -29,6 +44,7 @@ class PushState:
     total: int
     sent: int = 0
     acked: int = 0
+    kind: str = "model"  # model | firmware
     state: str = "starting"  # starting | sending | activating | done | failed
     message: str = ""
     started: float = field(default_factory=time.time)
@@ -41,6 +57,7 @@ class ModelPusher:
         self.transport = None
         self.acks: dict[str, tuple[ModelAck, float]] = {}
         self.model_ver: dict[str, int] = {}
+        self.fw_ver: dict[str, int] = {}
         self.pushes: dict[str, PushState] = {}
         self._ack_event: dict[str, asyncio.Event] = {}
         self._seq = int(time.time() * 1000) & 0x7FFFFFFF
@@ -53,18 +70,23 @@ class ModelPusher:
                 ev.set()
         elif p.type == TYPE_TELEM and p.telemetry is not None:
             self.model_ver[p.device_id] = p.telemetry.model_ver
+            self.fw_ver[p.device_id] = p.telemetry.fw_ver
 
     def status(self) -> list[dict]:
         return [vars(s) for s in self.pushes.values()]
 
     def start(self, device_id: str, blob: bytes) -> PushState:
-        if blob[:4] != b"WSNM" or len(blob) < 128:
-            raise ValueError("not a model blob")
+        fw = firmware_id(blob)
+        if fw is None and (blob[:4] != b"WSNM" or len(blob) < 128):
+            raise ValueError("neither a model blob nor a firmware image")
         cur = self.pushes.get(device_id)
         if cur and cur.state in ("starting", "sending", "activating"):
             raise RuntimeError("push already running")
         loop = asyncio.get_running_loop()  # вызывать из цикла событий сервера (иначе RuntimeError до записи состояния)
-        st = PushState(device_id, struct.unpack_from("<I", blob, 4)[0], len(blob))
+        ver = fw if fw is not None else struct.unpack_from("<I", blob, 4)[0]
+        if fw is None and ver & FW_FLAG:
+            raise ValueError("model version must not have bit 31 set")
+        st = PushState(device_id, ver, len(blob), kind="firmware" if fw is not None else "model")
         self.pushes[device_id] = st
         loop.create_task(self._run(st, blob))
         return st
@@ -72,17 +94,20 @@ class ModelPusher:
     async def _run(self, st: PushState, blob: bytes) -> None:
         dev = st.device_id
         ev = self._ack_event.setdefault(dev, asyncio.Event())
-        end = time.monotonic() + TIMEOUT_S
+        end = time.monotonic() + (FW_TIMEOUT_S if st.kind == "firmware" else TIMEOUT_S)
         try:
             while time.monotonic() < end:
-                if self.model_ver.get(dev) == st.version:
+                if st.kind == "model" and self.model_ver.get(dev) == st.version:
                     st.state, st.message = "done", "board runs the new model"
+                    return
+                if st.kind == "firmware" and self.fw_ver.get(dev) == st.version:
+                    st.state, st.message = "done", "board runs the new firmware"
                     return
                 ack = self.acks.get(dev, (None, 0))[0]
                 if ack is not None and ack.version == st.version:
                     st.acked = ack.received
                     if ack.state == 2:
-                        st.state, st.message = "activating", "board verified the model and restarts"
+                        st.state, st.message = "activating", f"board verified the {st.kind} and restarts"
                     elif ack.state == 3:
                         st.state, st.message = "failed", f"board error {ack.error}"
                         return

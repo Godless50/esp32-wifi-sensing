@@ -1,6 +1,8 @@
 """Recording sessions: SQLite metadata + per-session files (spec 6.2).
 
-data/sessions/<id>/csi.bin   records: u64 recv_ns (server monotonic) | u16 len | datagram bytes
+data/sessions/<id>/csi.bin   records: u64 recv_ns (server monotonic) | u16 len | datagram bytes — the session's board
+data/sessions/<id>/csi_all.bin  same records, datagrams of every board (each carries its device id): the labels of
+                                one session describe the whole flat, so all boards are kept for multi-board models
 data/sessions/<id>/pose.jsonl, events.jsonl, meta.json
 Only one session is active at a time; append_* calls without an active session are ignored.
 """
@@ -119,6 +121,7 @@ class Store:
             (d / "meta.json").write_text(json.dumps(asdict(info), ensure_ascii=False, indent=2))
             self._files = {
                 "csi": open(d / "csi.bin", "ab"),
+                "csi_all": open(d / "csi_all.bin", "ab"),
                 "pose": open(d / "pose.jsonl", "a", encoding="utf-8"),
                 "event": open(d / "events.jsonl", "a", encoding="utf-8"),
             }
@@ -206,6 +209,13 @@ class Store:
             f.write(_REC.pack(int(recv_t * 1e9), len(buf)) + buf)
             f.flush()
             self._active.csi_packets += 1
+
+    def append_csi_all(self, recv_t: float, buf: bytes) -> None:
+        """Datagram of any board, while a session runs (csi_all.bin)."""
+        with self._lock:
+            if self._active is None:
+                return
+            self._files["csi_all"].write(_REC.pack(int(recv_t * 1e9), len(buf)) + buf)
 
     def append_pose(self, rec: dict) -> None:
         self._append("pose", rec, "poses")

@@ -1,4 +1,4 @@
-"""Feeds accepted datagrams of the recorded device into the active session; auto-stops idle sessions."""
+"""Feeds accepted datagrams into the active session (its board -> csi.bin, every board -> csi_all.bin); auto-stops idle sessions."""
 
 from __future__ import annotations
 
@@ -16,9 +16,11 @@ class Recorder:
 
     def on_datagram(self, buf: bytes, device_id: str, recv_t: float) -> None:
         s = self.store.active()
-        if s is None or s.device_id != device_id.lower():
+        if s is None:
             return
-        self.store.append_csi(recv_t, buf)
+        self.store.append_csi_all(recv_t, buf)  # все платы: отметки сессии описывают всю квартиру
+        if s.device_id == device_id.lower():
+            self.store.append_csi(recv_t, buf)
 
     def note_activity(self, now: float) -> None:
         """Phone data (poses/events) keeps the session alive; CSI alone does not (board streams forever)."""

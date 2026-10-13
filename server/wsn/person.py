@@ -80,6 +80,12 @@ COUNT_ON, COUNT_HOLD_S, EXPLAIN_S = 3.0, 2.0, 0.25
 ROOM_EMIT_S, ROOM_HIST_S, ROOM_HIST_STEP = 1.0, 600.0, 5.0
 ROOM_MOTION_ON = 0.35  # с этого уровня в комнате «движение»
 LOCAL_MIN_LINKS = 3
+# Комната со своей платой: средняя активность линий платы (EMA BOARD_EMA_S). Человек рядом с приёмником возмущает
+# его линии сильнее, чем линии других плат; движение в другом месте задевает все платы понемногу. Поэтому
+# «кто-то здесь» = активность платы >= LOCAL_ON и выше медианы по всем платам на LOCAL_ABOVE (13.10, человек сидит
+# в туалете: попадание 0.77, ложные в пустых комнатах с платами 0.01; прежний порог по медиане линий — 0.04).
+BOARD_EMA_S, LOCAL_ON, LOCAL_ABOVE = 3.0, 0.05, 0.02
+LOCAL_W = 1.0  # то же как свидетельство о месте для трекера: клетки этой комнаты x2 за секунду
 EXTRA_EMA_S = 3.0  # сглаживание числа людей и позы от многоголовой модели
 EXTRA_FRESH_S = 5.0
 
@@ -259,6 +265,7 @@ class PersonTracker:
         self._room_last_motion: dict[str, float] = {}
         self._link_breath: dict[tuple[str, str], tuple[float, float]] = {}  # линия -> (t, вдохов/мин)
         self._rooms_at = -1e9
+        self._board_act: dict[str, tuple[float, float]] = {}  # плата -> (t, EMA средней активности её линий)
         self.last: dict | None = None
 
     # ---- план ----
@@ -376,6 +383,43 @@ class PersonTracker:
             out[key] = min(1.0, max(0.0, (ln.ratio - LINK_ON) / LINK_SPAN))
         return out
 
+    def _update_board_act(self, now: float) -> None:
+        per: dict[str, list[float]] = {}
+        for (dev, _), a in self._link_activity(now).items():
+            per.setdefault(dev, []).append(a)
+        for dev, xs in per.items():
+            if len(xs) < LOCAL_MIN_LINKS:
+                continue
+            v = float(np.mean(xs))
+            old = self._board_act.get(dev)
+            if old is None or now - old[0] > 10.0:
+                self._board_act[dev] = (now, v)
+            else:
+                a = 1.0 - math.exp(-max(0.0, now - old[0]) / BOARD_EMA_S)
+                self._board_act[dev] = (now, old[1] + a * (v - old[1]))
+
+    def _board_local(self, now: float) -> dict[str, tuple[float, bool]]:
+        """Room of each board -> (activity of its links, somebody near this board)."""
+        g = self.grid
+        fresh = {d: v for d, (t, v) in self._board_act.items() if now - t <= LINK_MAX_AGE_S + 1.0 and d in g.boards}
+        if not fresh:
+            return {}
+        med = float(np.median(list(fresh.values())))
+        out: dict[str, tuple[float, bool]] = {}
+        for dev, v in fresh.items():
+            lab = g.labels[g.label_idx[int(np.argmin(np.hypot(*(g.xy - g.boards[dev]).T)))]]
+            here = v >= LOCAL_ON and (len(fresh) < 2 or v - med >= LOCAL_ABOVE)
+            pv, ph = out.get(lab, (0.0, False))
+            out[lab] = (max(pv, v), ph or here)
+        return out
+
+    def _local_evidence(self, b: np.ndarray, now: float, w: float) -> np.ndarray:
+        g = self.grid
+        for lab, (_, here) in self._board_local(now).items():
+            if here:
+                b = b * np.where(g.label_idx == g.labels.index(lab), 1.0 + LOCAL_W, 1.0) ** w
+        return b
+
     def _on_pred(self, msg: dict) -> dict | None:
         g = self.grid
         if g is None:
@@ -410,6 +454,7 @@ class PersonTracker:
         fresh = [v for (tt, v) in self._mv.values() if now - tt <= PRED_MAX_AGE_S]
         model_mv = sum(fresh) / len(fresh) if fresh else 0.0
         acts = self._link_activity(now)
+        self._update_board_act(now)
         top = sorted(acts.values(), reverse=True)[:2]
         link_mv = sum(top) / len(top) if top else 0.0
         score = 0.75 * model_mv + 0.25 * link_mv if fresh else link_mv
@@ -427,6 +472,10 @@ class PersonTracker:
         self._t = now
         b = self.belief
         if not self.moving:  # неподвижен: помним, где остановился (ответы модели о зоне сейчас — шум)
+            if g.boards:  # но мелкие движения рядом с платой видны: человек у этой платы
+                lb = self._local_evidence(b, now, 0.5 * dt_src)
+                if lb.sum() > 0 and np.isfinite(lb.sum()):
+                    self.belief = lb / lb.sum()
             return self._state(now, dt)
         speed = SPEED_MOVING
         self._steps_acc += (speed / CELL_M) ** 2 * dt / 0.75
@@ -455,6 +504,7 @@ class PersonTracker:
                 lf = lf * ((1 - act) * (1 - QUIET_LINK * s) + act * (0.15 + 0.85 * s)) ** lw
             b = b * lf
             geo = geo * lf
+        b = self._local_evidence(b, now, dt_src)
         rho = min(1.0, REACQUIRE_PER_S * dt)
         norm = lambda v: v / v.sum() if v.sum() > 0 and np.isfinite(v.sum()) else np.full(g.n, 1.0 / g.n)
         self.belief = (1 - rho) * norm(b) + rho / g.n
@@ -605,18 +655,12 @@ class PersonTracker:
             return None
         self._rooms_at = now
         g = self.grid
-        acts = self._link_activity(now)
-        per_board: dict[str, list[float]] = {}
-        for (dev, _), a in acts.items():
-            per_board.setdefault(dev, []).append(a)
+        board_room = {dev: g.labels[g.label_idx[int(np.argmin(np.hypot(*(g.xy - p).T)))]]
+                      for dev, p in g.boards.items()}
         local: dict[str, float] = {}
-        board_room: dict[str, str] = {}
-        for dev, p in g.boards.items():
-            lab = g.labels[g.label_idx[int(np.argmin(np.hypot(*(g.xy - p).T)))]]
-            board_room[dev] = lab
-            xs = per_board.get(dev, [])
-            if len(xs) >= LOCAL_MIN_LINKS:
-                local[lab] = max(local.get(lab, 0.0), float(np.median(xs)))
+        for lab, (v, here) in self._board_local(now).items():
+            # «кто-то здесь» -> не ниже «слабое», сильная активность -> «движение»; иначе ниже порога «слабое»
+            local[lab] = min(1.0, 0.15 + 2.0 * (v - LOCAL_ON)) if here else min(0.14, 2.0 * v)
         mass = np.bincount(g.label_idx, weights=self.belief, minlength=len(g.labels))
         breath: dict[str, float] = {}
         for (dev, src), (tb, bpm) in self._link_breath.items():

@@ -264,3 +264,24 @@ def test_rooms_light_up_where_a_board_sees_motion_close_by():
     tr.on_message(pred(t + 1.0, pa=0.5, moving=0.9))
     last = {r["name"]: r for r in tr.rooms_out[-1]["rooms"]}
     assert last["A"]["breath_bpm"] == 15  # передатчик линии стоит в A
+
+
+def test_board_room_is_occupied_only_when_its_board_is_disturbed_more_than_the_others():
+    plan = {**PLAN, "boards": [{"device_id": "d1", "xy": [1.0, 1.0]}, {"device_id": "d2", "xy": [5.0, 1.0]},
+                               {"device_id": "d3", "xy": [5.5, 2.5]}]}
+    tr = PersonTracker()
+    tr.set_plan(plan)
+    now = 100.0
+    # d1 (комната A) заметно выше остальных: рядом с ней кто-то есть; d2, d3 (комната B) — фон
+    tr._board_act = {"d1": (now, 0.12), "d2": (now, 0.05), "d3": (now, 0.04)}
+    loc = tr._board_local(now)
+    assert loc["A"][1] and not loc["B"][1]
+    # движение где-то задевает все платы одинаково: никого «рядом» нет
+    tr._board_act = {"d1": (now, 0.10), "d2": (now, 0.10), "d3": (now, 0.09)}
+    loc = tr._board_local(now)
+    assert not loc["A"][1] and not loc["B"][1]
+    # слишком слабо — шум, даже если выше остальных
+    tr._board_act = {"d1": (now, 0.04), "d2": (now, 0.0), "d3": (now, 0.0)}
+    assert not tr._board_local(now)["A"][1]
+    # устаревшие значения не считаются
+    assert tr._board_local(now + 10.0) == {}
