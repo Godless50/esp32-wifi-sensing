@@ -71,6 +71,9 @@ static bool log_pop(char *line)
 static wsn_settings_t s_cfg;
 static uint32_t s_boot_id;
 static volatile float s_csi_hz;
+static uint32_t s_sound_n; /* зондов сервера с прошлой телеметрии */
+#define SOUND_ON_HZ 30     /* столько зондов в секунду — сервер «звучит», свой пинг почти не нужен */
+#define PING_WITH_SOUND_HZ 5
 
 static void hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *msg, size_t len, uint8_t out[32])
 {
@@ -144,15 +147,25 @@ static void uplink_task(void *arg)
         }
         wsn_pred_t pred;
         if (infer_take(&pred)) send_pkt(sock, &dst, out, wsn_encode_pred(&ctx, &pred, out, sizeof(out)));
-        if (sock >= 0) {  /* куски новой модели от сервера (подписаны, привязаны к этой загрузке) */
+        if (sock >= 0) {  /* от сервера: куски новой модели (подписаны, привязаны к этой загрузке) и «зонд» */
             static uint8_t rx[WSN_MAX_DATAGRAM];
             static uint32_t last_seq;
-            int r = recvfrom(sock, rx, sizeof(rx), MSG_DONTWAIT, NULL, NULL);
-            wsn_model_chunk_t ch;
-            uint32_t seq;
-            if (r > 0 && wsn_parse_model_chunk(&ctx, rx, (size_t)r, &seq, &ch) == 0 && seq > last_seq) {
-                last_seq = seq;
-                model_ota_feed(&ch);
+            /* Сервер шлёт каждой плате ~100 крошечных датаграмм «WSNS» в секунду: их передаёт плате её точка
+             * доступа, и каждая — замер CSI линии «точка доступа -> плата». Читаем всё, что накопилось, иначе
+             * при одном чтении за проход (~10 мс) куски модели ждали бы в очереди за зондами. */
+            for (int k = 0; k < 16; k++) {
+                int r = recvfrom(sock, rx, sizeof(rx), MSG_DONTWAIT, NULL, NULL);
+                if (r <= 0) break;
+                if (r >= 4 && memcmp(rx, "WSNS", 4) == 0) {
+                    s_sound_n++;
+                    continue;
+                }
+                wsn_model_chunk_t ch;
+                uint32_t seq;
+                if (wsn_parse_model_chunk(&ctx, rx, (size_t)r, &seq, &ch) == 0 && seq > last_seq) {
+                    last_seq = seq;
+                    model_ota_feed(&ch);
+                }
             }
         }
         wsn_model_ack_t ack;
@@ -187,6 +200,10 @@ static void uplink_task(void *arg)
             };
             send_pkt(sock, &dst, out, wsn_encode_telem(&ctx, &t, out, sizeof(out)));
             panic_trace_tick(t.uptime_s);
+            /* Пинг шлюза — запасной источник кадров точки доступа: пока сервер присылает зонды, хватает 5 Гц
+             * (иначе 3 платы x 100 Гц ICMP упирались в ограничение роутера: ответы одной платы пропадали). */
+            ping_gen_set_hz(s_sound_n / dt >= SOUND_ON_HZ ? PING_WITH_SOUND_HZ : s_cfg.ping_hz);
+            s_sound_n = 0;
             if (t.uptime_s >= GUARD_ARM_S) {
                 guard_arm(); /* один раз за загрузку */
                 guard_check();

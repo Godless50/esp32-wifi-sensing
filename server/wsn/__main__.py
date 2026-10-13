@@ -14,6 +14,7 @@ from .live import LiveHub
 from .mirror import DatagramMirror
 from .model_push import ModelPusher
 from .recorder import Recorder
+from .sounder import Sounder
 from .store import Store
 
 
@@ -46,8 +47,10 @@ def main() -> None:
         return min(live, key=lambda d: d.age_s).device_id if live else None
 
     pinger = Pinger(PingerConfig.load(data / "links.json"))
+    sound_hz = float(os.environ.get("WSN_SOUND_HZ", "100"))  # 0 — не зондировать
+    sounder = Sounder(ingest, pusher, hz=sound_hz, last_seen=hub.last_seen) if sound_hz > 0 else None
     app = create_app(hub, ingest, ui, udp_port=udp_port, store=store, recorder=recorder,
-                     default_device=default_device, pinger=pinger, pusher=pusher)
+                     default_device=default_device, pinger=pinger, pusher=pusher, sounder=sounder)
     uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
 
 

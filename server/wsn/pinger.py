@@ -53,8 +53,8 @@ class PingerConfig:
             return cls()
         d = json.loads(path.read_text(encoding="utf-8"))
         hz = float(d.get("ping_hz", 20.0))
-        if not 0.5 <= hz <= 100:
-            raise ValueError("ping_hz must be within 0.5..100")
+        if hz != 0 and not 0.5 <= hz <= 100:
+            raise ValueError("ping_hz must be 0 (off) or within 0.5..100")
         return cls(hz, [Target(t["ip"], t.get("mac", ""), t.get("name", "")) for t in d.get("targets", [])])
 
 
@@ -93,7 +93,8 @@ class Pinger:
                 by_ip[ip].replies += 1
 
     async def run(self) -> None:
-        if not self.cfg.targets:
+        if not self.cfg.targets or self.cfg.ping_hz <= 0:  # 0: выключен (их кадры видны платам только в promiscuous)
+            log.info("pinger: off")
             return
         period = 1.0 / self.cfg.ping_hz
         log.info("pinger: %d targets at %.0f Hz", len(self.cfg.targets), self.cfg.ping_hz)

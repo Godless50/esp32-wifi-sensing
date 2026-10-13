@@ -13,6 +13,7 @@ services:
       WSN_DATA: /data
       WSN_UI: /ui
       TZ: Europe/Moscow
+      WSN_SOUND_HZ: "${WSN_SOUND_HZ:-100}"  # зонды сервера -> платы (0 — выключить)
     volumes:
       - ../data:/data
       - ../ui:/ui:ro

@@ -98,3 +98,14 @@ void ping_gen_stop(void)
 {
     s_gw = 0;
 }
+
+void ping_gen_set_hz(uint16_t hz)
+{
+    if (hz < 1) hz = 1;
+    if (hz > 200) hz = 200;
+    if (hz != s_hz) {
+        s_hz = hz;
+        s_gen++; /* отсчёт периода заново */
+        ESP_LOGI(TAG, "rate %u Hz", hz);
+    }
+}

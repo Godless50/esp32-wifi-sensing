@@ -187,6 +187,11 @@ class LiveHub:
                                            age_s=max(0.0, now - st.last_seen), counters=dict(st.counters)))
         return out
 
+    def last_seen(self, device_id: str) -> float | None:
+        """Monotonic time of the last packet from the board (None: never seen)."""
+        st = self._stats.get(device_id)
+        return st.last_seen if st is not None else None
+
     def on_packet(self, p: Packet, recv_t: float) -> None:
         st = self._stats.get(p.device_id)
         if st is None:

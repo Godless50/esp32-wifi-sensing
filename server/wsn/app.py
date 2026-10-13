@@ -113,6 +113,7 @@ def create_app(
     default_device: Callable[[], str | None] | None = None,
     pinger=None,
     pusher=None,
+    sounder=None,
 ) -> FastAPI:
     ui_dir = Path(ui_dir)
     tracker = RoomTracker()
@@ -178,6 +179,9 @@ def create_app(
             log.info("UDP ingest on :%d", udp_port)
             if pusher is not None:
                 pusher.transport = transport
+            if sounder is not None:
+                sounder.transport = transport
+                tasks.append(asyncio.create_task(sounder.run()))
         if recorder is not None:
             tasks.append(asyncio.create_task(ticker()))
         if pinger is not None:

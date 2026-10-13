@@ -29,7 +29,7 @@ static uint8_t s_source;
 static uint8_t s_tx[MAX_TX][6]; /* [0] = точка доступа платы, дальше — дополнительные передатчики */
 static size_t s_tx_n;
 static int64_t s_tx_last[MAX_TX];
-#define LINK_MIN_US 20000 /* до 50 Гц на дополнительный передатчик: не забивать эфир и очередь */
+#define LINK_MIN_US 15000 /* до ~66 Гц на передатчик: маяки ESP-NOW по 50 Гц проходят все (при 20000 из-за дрожания терялась половина) */
 static csi_counters_t s_cnt;
 static bool s_promisc;  /* включено ли прослушивание (нужно для дополнительных линий) */
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
