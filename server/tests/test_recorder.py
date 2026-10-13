@@ -136,6 +136,31 @@ async def test_scenario_labels(rig, tmp_path):
 
 
 
+async def test_people_labels_with_counts_posture_and_delay(rig, tmp_path):
+    import json
+    import time
+    store, _, _, app = rig
+    (tmp_path / "ui" / "people").mkdir()
+    (tmp_path / "ui" / "people" / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        assert (await c.get("/people")).status_code == 200
+        sid = (await c.post("/api/sessions", json={"kind": "static", "device_id": DEV, "duration_s": 60})).json()["id"]
+        ok = {"zones": {"зал": {"count": 2, "moving": 1, "posture": "сидит", "arms": "согнуты", "activity": "1 ходит"}},
+              "script": True}
+        assert (await c.post("/api/labels", json=ok)).status_code == 200
+        for bad in ({"зал": {"count": 1, "moving": 2}}, {"зал": {"count": 1, "posture": "висит"}},
+                    {"зал": {"count": 1, "arms": "крыльями"}}):
+            assert (await c.post("/api/labels", json={"zones": bad})).status_code == 422
+        t_before = time.monotonic()
+        empty = {"zones": {z: {"count": 0} for z in ("зал", "спальня")}, "note": "пусто", "delay_s": 60, "script": True}
+        assert (await c.post("/api/labels", json=empty)).status_code == 200
+        await c.post(f"/api/sessions/{sid}/stop")
+    evs = [json.loads(x) for x in (store.session_dir(sid) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    a, b = [e for e in evs if e["kind"] == "occupancy"]
+    assert a["zones"]["зал"] == {"count": 2, "moving": 1, "posture": "сидит", "arms": "согнуты", "activity": "1 ходит"}
+    assert b["delay_s"] == 60 and b["t"] >= t_before + 59
+
+
 async def test_prediction_is_published_live(rig):
     store, _, _, app = rig
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
@@ -145,3 +170,22 @@ async def test_prediction_is_published_live(rig):
         bad = await c.post("/api/predict", json={"device_id": DEV, "zone": "зал", "zone_p": 2, "activity": "x",
                                                  "activity_p": 0.1, "moving_p": 0.1})
         assert bad.status_code == 422
+
+
+
+async def test_provision_password_handoff_is_one_shot_and_token_guarded(rig, tmp_path):
+    store, _, _, app = rig
+    tok = (tmp_path / "run" / "provision.token").read_text()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        assert (await c.post("/api/provision/wifi", json={"password": "short"})).status_code == 422
+        assert (await c.post("/api/provision/wifi", json={"password": "correct horse"})).status_code == 200
+        assert (await c.get("/api/provision/status")).json()["waiting"] is True
+        assert (await c.post("/api/provision/take")).status_code == 403
+        assert (await c.post("/api/provision/take", headers={"x-provision-token": "bad"})).status_code == 403
+        r = await c.post("/api/provision/take", headers={"x-provision-token": tok})
+        assert r.json() == {"password": "correct horse"}
+        assert (await c.post("/api/provision/take", headers={"x-provision-token": tok})).status_code == 404
+        await c.post("/api/provision/result", json={"ok": True, "message": "connected"}, headers={"x-provision-token": tok})
+        st = (await c.get("/api/provision/status")).json()
+        assert st == {"waiting": False, "result": {"ok": True, "message": "connected"}}
+    assert "correct horse" not in "".join(p.read_text(errors="ignore") for p in tmp_path.rglob("*") if p.is_file())

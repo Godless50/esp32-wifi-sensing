@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Новая плата</title>
+<style>
+  :root { --bg: #0f1216; --panel: #171b21; --line: #262c35; --text: #e6e9ee; --muted: #8a93a1; --ok: #3fb68b; --bad: #e0564f; --accent: #5aa2ff; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg: #f5f6f8; --panel: #fff; --line: #dde1e7; --text: #1b1f24; --muted: #5f6873; } }
+  :root[data-theme="light"] { --bg: #f5f6f8; --panel: #fff; --line: #dde1e7; --text: #1b1f24; --muted: #5f6873; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
+  main { max-width: 480px; margin: 0 auto; padding: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  p { color: var(--muted); margin: 6px 0 14px; }
+  input { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  button { margin-top: 12px; width: 100%; min-height: 46px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; }
+  #status { margin-top: 12px; min-height: 1.4em; overflow-wrap: anywhere; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Пароль Wi-Fi для новой платы</h1>
+    <p>Пароль уходит на сервер по защищённому соединению, держится только в памяти до 10 минут и один раз передаётся в новую плату по USB. В файлы и журналы он не попадает.</p>
+    <form id="f" autocomplete="off">
+      <input id="pw" type="password" minlength="8" maxlength="63" placeholder="пароль сети HomeNet" autocomplete="off" required>
+      <button id="go" type="submit">Отправить на плату</button>
+    </form>
+    <div id="status"></div>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const st = (t, cls = "") => { $("status").textContent = t; $("status").className = cls; };
+let timer = null;
+async function poll() {
+  try {
+    const r = await (await fetch("/api/provision/status", { cache: "no-store" })).json();
+    if (r.result) { st(r.result.message, r.result.ok ? "ok" : "bad"); clearInterval(timer); $("go").disabled = false; return; }
+    st(r.waiting ? "Пароль на сервере, жду, пока плата его примет…" : "Время ожидания вышло — отправь ещё раз");
+    if (!r.waiting) { clearInterval(timer); $("go").disabled = false; }
+  } catch (e) { st("нет связи с сервером", "bad"); }
+}
+$("f").onsubmit = async (e) => {
+  e.preventDefault();
+  $("go").disabled = true;
+  const r = await fetch("/api/provision/wifi", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: $("pw").value }) });
+  $("pw").value = "";
+  if (!r.ok) { st(r.status === 422 ? "Пароль Wi-Fi — от 8 до 63 символов" : `ошибка ${r.status}`, "bad"); $("go").disabled = false; return; }
+  timer = setInterval(poll, 2000); poll();
+};
+</script>
+</body>
+</html>

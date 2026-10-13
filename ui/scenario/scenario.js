@@ -9,7 +9,15 @@ const POINTS = [
   { zone: "коридор", place: "у входной двери", on: true },
   { zone: "коридор", place: "у арки", on: true },
   { zone: "санузел", place: "в санузле", on: true },
-  { zone: "спальня", place: "у двери спальни", on: false },
+  { zone: "спальня", place: "у двери спальни", on: true },
+  { zone: "спальня", place: "у кровати", on: true },
+  { zone: "спальня", place: "у окна спальни", on: true },
+  { zone: "комната", place: "у двери комнаты", on: true },
+  { zone: "комната", place: "в середине комнаты", on: true },
+  { zone: "зал", place: "в середине зала", on: false },
+  { zone: "зал", place: "у дивана", on: false },
+  { zone: "кухня", place: "у стола", on: false },
+  { zone: "коридор", place: "в середине коридора", on: false },
 ];
 const ACTS = [
   { act: "стоит", say: "Стой спокойно", text: "Стой спокойно", label: "стоит", sec: 30, on: true },

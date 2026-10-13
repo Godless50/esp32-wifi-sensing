@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Кто где</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --line: #262c35; --text: #e6e9ee; --muted: #8a93a1;
+    --ok: #3fb68b; --warn: #e0a43a; --bad: #e0564f; --accent: #5aa2ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) { --bg: #f5f6f8; --panel: #ffffff; --line: #dde1e7; --text: #1b1f24; --muted: #5f6873; }
+  }
+  :root[data-theme="light"] { --bg: #f5f6f8; --panel: #ffffff; --line: #dde1e7; --text: #1b1f24; --muted: #5f6873; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  nav a { color: var(--muted); text-decoration: none; margin-right: 10px; font-size: 13px; }
+  main { max-width: 640px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 8px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .room { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+  .room:first-of-type { border-top: 0; }
+  .room .name { font-weight: 600; align-self: center; }
+  .step { display: flex; align-items: center; gap: 6px; }
+  .step span { min-width: 1.6em; text-align: center; font-variant-numeric: tabular-nums; font-weight: 650; }
+  .extra { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; }
+  .extra[hidden] { display: none; }
+  label { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  button, select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 14px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  #status { font-size: 13px; }
+  #status.bad { color: var(--bad); }
+  #log { font-size: 13px; color: var(--muted); max-height: 220px; overflow: auto; margin: 0; padding-left: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Кто где</h1>
+  <nav><a href="/">Квартира</a><a href="/scenario">Сценарий</a><a href="/data">Данные</a></nav>
+</header>
+<main>
+  <div class="card">
+    <h2>Запись</h2>
+    <div class="row">
+      <button id="start" class="primary">Начать запись</button>
+      <button id="stop" disabled>Остановить</button>
+      <span id="status" class="muted">проверяю…</span>
+    </div>
+    <p class="muted">Отмечайте, сколько людей в каждой комнате и сколько из них двигается. Отметка действует до следующей. Это реальные метки для проверки подсчёта людей.</p>
+  </div>
+  <div class="card">
+    <h2>Сейчас в квартире</h2>
+    <div id="rooms"></div>
+    <div class="row" style="margin-top:10px">
+      <button id="mark" class="primary" disabled>Отметить</button>
+      <span id="total" class="muted"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Пустая квартира</h2>
+    <div class="row">
+      <label>все уходят через <select id="delay"><option>30</option><option selected>60</option><option>120</option><option>300</option></select> с</label>
+      <button id="empty" disabled>Все уходят</button>
+    </div>
+    <p class="muted">Метка «никого» начнёт действовать через выбранное время, пока все выходят. Когда вернётесь, отметьте, кто где.</p>
+  </div>
+  <div class="card">
+    <h2>Отметки</h2>
+    <ol id="log"></ol>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const POSTURES = ["", "стоит", "сидит", "лежит", "разные"];
+const ARMS = ["", "опущены", "согнуты", "подняты", "разные"];
+const MAX = 5;
+let rooms = [];      // комнаты и зоны плана
+const state = {};    // комната -> {count, moving, posture, arms}
+let sid = null, mine = false;
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(`${path}: HTTP ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+function setStatus(text, bad = false) { $("status").textContent = text; $("status").className = bad ? "bad" : "muted"; }
+
+function stepper(value, max, onChange) {
+  const wrap = document.createElement("div"); wrap.className = "step";
+  const minus = document.createElement("button"); minus.textContent = "−"; minus.setAttribute("aria-label", "меньше");
+  const plus = document.createElement("button"); plus.textContent = "+"; plus.setAttribute("aria-label", "больше");
+  const v = document.createElement("span"); v.textContent = value;
+  minus.onclick = () => onChange(Math.max(0, value - 1));
+  plus.onclick = () => onChange(Math.min(max(), value + 1));
+  wrap.append(minus, v, plus);
+  return wrap;
+}
+
+function select(options, value, onChange, title) {
+  const s = document.createElement("select");
+  s.title = title;
+  for (const o of options) { const op = document.createElement("option"); op.value = o; op.textContent = o || "—"; s.append(op); }
+  s.value = value; s.onchange = () => onChange(s.value);
+  return s;
+}
+
+function render() {
+  const box = $("rooms"); box.replaceChildren();
+  let total = 0, moving = 0;
+  for (const name of rooms) {
+    const st = state[name];
+    total += st.count; moving += st.moving;
+    const row = document.createElement("div"); row.className = "room";
+    const n = document.createElement("div"); n.className = "name"; n.textContent = name;
+    row.append(n, stepper(st.count, () => MAX, (v) => { st.count = v; st.moving = Math.min(st.moving, v); render(); }));
+    const ex = document.createElement("div"); ex.className = "extra"; ex.hidden = st.count === 0;
+    const lm = document.createElement("label"); lm.append("двигается", stepper(st.moving, () => st.count, (v) => { st.moving = v; render(); }));
+    const lp = document.createElement("label"); lp.append("поза", select(POSTURES, st.posture, (v) => { st.posture = v; }, "поза"));
+    const la = document.createElement("label"); la.append("руки", select(ARMS, st.arms, (v) => { st.arms = v; }, "руки"));
+    ex.append(lm, lp, la);
+    row.append(ex);
+    box.append(row);
+  }
+  $("total").textContent = `всего ${total}, двигается ${moving}`;
+}
+
+function zonesBody() {
+  const zones = {};
+  for (const name of rooms) {
+    const st = state[name];
+    const z = { count: st.count, moving: st.moving, activity: st.count ? `${st.moving} из ${st.count} двигается` : "" };
+    if (st.count && st.posture) z.posture = st.posture;
+    if (st.count && st.arms) z.arms = st.arms;
+    zones[name] = z;
+  }
+  return zones;
+}
+
+function logLine(text) {
+  const li = document.createElement("li");
+  li.textContent = `${new Date().toLocaleTimeString()} — ${text}`;
+  $("log").prepend(li);
+}
+
+async function refresh() {
+  try {
+    const active = (await api("/api/sessions")).find((s) => !s.stopped);
+    sid = active ? active.id : null;
+    $("start").disabled = !!sid; $("stop").disabled = !sid || !mine;
+    for (const b of ["mark", "empty"]) $(b).disabled = !sid;
+    setStatus(sid ? `идёт запись ${sid}${mine ? "" : " (начата не здесь)"}` : "запись не идёт");
+  } catch (e) { setStatus(`нет связи с сервером: ${e.message}`, true); }
+}
+
+$("start").onclick = async () => {
+  try {
+    const devs = (await api("/api/devices")).devices.filter((d) => d.age_s < 10);
+    if (!devs.length) throw new Error("ни одна плата не в сети");
+    const r = await api("/api/sessions", { kind: "static", device_id: devs[0].device_id, duration_s: 3 * 3600 });
+    mine = true; sid = r.id; logLine(`запись ${r.id} начата`);
+  } catch (e) { setStatus(e.message, true); }
+  refresh();
+};
+$("stop").onclick = async () => {
+  try { await api(`/api/sessions/${sid}/stop`, {}); logLine("запись остановлена"); mine = false; } catch (e) { setStatus(e.message, true); }
+  refresh();
+};
+$("mark").onclick = async () => {
+  try {
+    const zones = zonesBody();
+    const note = "люди: " + Object.entries(zones).filter(([, z]) => z.count).map(([n, z]) => `${n} ${z.count} (${z.moving} дв.)`).join(", ");
+    await api("/api/labels", { zones, script: true, note: note.slice(0, 200) });
+    logLine($("total").textContent);
+  } catch (e) { setStatus(e.message, true); }
+};
+$("empty").onclick = async () => {
+  const delay = Number($("delay").value);
+  try {
+    const zones = Object.fromEntries(rooms.map((n) => [n, { count: 0, moving: 0 }]));
+    await api("/api/labels", { zones, script: true, note: "пусто", delay_s: delay });
+    for (const n of rooms) Object.assign(state[n], { count: 0, moving: 0 });
+    render();
+    logLine(`пусто через ${delay} с`);
+  } catch (e) { setStatus(e.message, true); }
+};
+
+(async () => {
+  try {
+    const plan = await api("/api/plan");
+    rooms = [...plan.rooms.map((r) => r.name), ...(plan.zones || []).map((z) => z.name)];
+  } catch (e) { rooms = ["спальня", "зал", "кухня", "коридор", "санузел", "комната"]; }
+  for (const n of rooms) state[n] = { count: 0, moving: 0, posture: "", arms: "" };
+  render();
+  refresh();
+  setInterval(refresh, 10000);
+})();
+</script>
+</body>
+</html>

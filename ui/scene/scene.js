@@ -27,7 +27,12 @@ scene.add(sun);
 let planGroup = new THREE.Group(), trajGroup = new THREE.Group();
 scene.add(planGroup, trajGroup);
 let bbox = { cx: 0, cy: 0, size: 8 };
-const links = new Map(); // "primary" | MAC передатчика -> {mat, energy, seen, zone}
+const links = new Map(); // "плата|primary" | "плата|MAC передатчика" -> {mat, energy, seen, zone}
+let mainDev = "";  // шкала движения — по основному каналу первой платы
+const linkOf = (m) => {
+  const k = m.primary ? "primary" : (m.src || "").toLowerCase();
+  return links.get(`${(m.device_id || "").toLowerCase()}|${k}`) || links.get(`|${k}`);
+};
 const floors = new Map(); // комната/зона -> материал пола (подсветка «где движение»)
 let zoneShapes = []; // [{name, poly}] — сначала зоны без стен (кухня), потом комнаты
 const zoneOf = (xy) => (zoneShapes.find((z) => inside(xy, z.poly)) || {}).name || null;
@@ -106,6 +111,7 @@ function wall(a, b, mat, edgeMat) {
 }
 
 function buildPlan(plan) {
+  countSprites.clear();  // подписи числа людей были в старой группе плана
   scene.remove(planGroup);
   planGroup = new THREE.Group();
   const wallMat = new THREE.MeshStandardMaterial({ color: 0xc9ced6, transparent: true, opacity: 0.28, depthWrite: false, side: THREE.DoubleSide });
@@ -173,24 +179,25 @@ function buildPlan(plan) {
     l.position.copy(v3(xy[0], xy[1], h + 0.35));
     planGroup.add(l);
   };
-  marker(plan.board || [0, 0], 0xe0564f, "плата", 0.8);
+  const boards = (plan.boards && plan.boards.length) ? plan.boards : [{ device_id: "", xy: plan.board || [0, 0], z: 0.8 }];
+  mainDev = boards[0].device_id || "";
+  boards.forEach((b, i) => marker(b.xy, 0xe0564f, boards.length > 1 ? `плата ${i + 1}` : "плата", b.z ?? 0.8));
   // линии связи «передатчик → плата»: каждая подсвечивается движением на своём канале
   zoneShapes = [...(plan.zones || []).map((z) => ({ name: z.name, poly: z.polygon })),
     ...plan.rooms.map((r) => ({ name: r.name, poly: r.polygon }))];
   links.clear();
-  const board = plan.board || [0, 0];
-  const addLink = (key, xy, h, name) => {
+  const addLink = (b, key, xy, h, name) => {
     const mat = new THREE.MeshBasicMaterial({ color: 0x3fb68b, transparent: true, opacity: 0.15 });
-    const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(v3(board[0], board[1], 0.8), v3(xy[0], xy[1], h)), 8, 0.025, 8), mat);
+    const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(v3(b.xy[0], b.xy[1], b.z ?? 0.8), v3(xy[0], xy[1], h)), 8, 0.025, 8), mat);
     planGroup.add(tube);
     // зона передатчика: движение рядом с ним; breath — последнее найденное дыхание на этой линии
-    links.set(key, { mat, energy: 0, seen: 0, zone: zoneOf(xy), name, xy, h, breath: null, sprite: null });
+    links.set(`${(b.device_id || "").toLowerCase()}|${key}`, { mat, energy: 0, seen: 0, zone: zoneOf(xy), name, xy, h, breath: null, sprite: null });
   };
-  if (plan.router) {
-    marker(plan.router, 0xb36ad9, "роутер B", 1.0);
-    addLink("primary", plan.router, 1.0, "роутер B");
+  if (plan.router) marker(plan.router, 0xb36ad9, "роутер B", 1.0);
+  for (const b of boards) {
+    if (plan.router) addLink(b, "primary", plan.router, 1.0, "роутер B");
+    for (const o of plan.objects || []) if (o.mac) addLink(b, o.mac.toLowerCase(), o.xy, (o.z || 0) + (o.size?.[2] || 0.3), o.type);
   }
-  for (const o of plan.objects || []) if (o.mac) addLink(o.mac.toLowerCase(), o.xy, (o.z || 0) + (o.size?.[2] || 0.3), o.type);
   scene.add(planGroup);
   const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
   bbox = {
@@ -248,9 +255,9 @@ const conn = document.getElementById("conn");
 const where = document.getElementById("where");
 
 function onMotion(m) {
-  const l = links.get(m.primary ? "primary" : (m.src || "").toLowerCase());
+  const l = linkOf(m);
   if (l) { l.energy = m.energy; l.seen = performance.now(); }
-  if (m.primary === false) return; // шкала — по основному каналу
+  if (m.primary === false || (mainDev && (m.device_id || "").toLowerCase() !== mainDev)) return; // шкала — по основному каналу первой платы
   energy = m.energy;
   motionSeen = performance.now();
   const frac = Math.max(0, Math.min(1, (m.energy - 0.5) / 3.5)); // 1 ≈ покой, ≥4 — сильное движение
@@ -268,7 +275,7 @@ function dropBreath(l) {
 }
 
 function onBreath(m) {
-  const l = links.get(m.primary ? "primary" : (m.src || "").toLowerCase());
+  const l = linkOf(m);
   if (!l) return;
   dropBreath(l);
   if (!m.ok) return;
@@ -289,6 +296,122 @@ function onPred(m) {
   else pred = { ...m, seen: performance.now() };
 }
 
+// ---- человек на плане (трекер сервера, сообщения "person") ----
+const PERSON_FRESH_MS = 5000;
+const personGroup = new THREE.Group();
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0xff8a3d, emissive: 0xff8a3d, emissiveIntensity: 0.35, transparent: true, opacity: 0.95 });
+const body = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.2, 1.25, 20), bodyMat);
+body.position.y = 0.625;
+const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 20, 14), bodyMat);
+head.position.y = 1.45;
+const ringMat = new THREE.MeshBasicMaterial({ color: 0xff8a3d, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false });
+const ring = new THREE.Mesh(new THREE.RingGeometry(0.92, 1.0, 48), ringMat);  // радиус = разброс оценки, м
+ring.rotation.x = -Math.PI / 2;
+ring.position.y = 0.025;
+personGroup.add(body, head, ring);
+personGroup.visible = false;
+scene.add(personGroup);
+let person = null, personLabel = null, personLabelText = "", personPlaced = false, lastFrame = 0;
+const personPos = new THREE.Vector3();
+const personBox = document.getElementById("personBox");
+const heatToggle = document.getElementById("heat");
+
+// где может быть человек: клетки 0.25 м, яркость ~ вероятности
+const HEAT_MAX = 80;
+const heatMesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.24, 0.24),
+  new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }), HEAT_MAX);
+const heatQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+const heatS = new THREE.Vector3(1, 1, 1), heatM = new THREE.Matrix4(), heatC = new THREE.Color(0, 0, 0);
+for (let i = 0; i < HEAT_MAX; i++) heatMesh.setColorAt(i, heatC);
+heatMesh.count = 0;
+scene.add(heatMesh);
+
+function onHeat(h) {
+  const pmax = Math.max(1e-9, ...h.map((c) => c[2]));
+  heatMesh.count = Math.min(HEAT_MAX, h.length);
+  for (let i = 0; i < heatMesh.count; i++) {
+    const [x, y, p] = h[i];
+    const k = Math.sqrt(p / pmax);
+    heatMesh.setMatrixAt(i, heatM.compose(v3(x, y, 0.03), heatQ, heatS));
+    heatMesh.setColorAt(i, heatC.setRGB(0.12 * k, 0.4 * k, 1.0 * k));
+  }
+  heatMesh.instanceMatrix.needsUpdate = true;
+  heatMesh.instanceColor.needsUpdate = true;
+}
+
+function onPerson(m) {
+  person = { ...m, seen: performance.now() };
+  if (m.heat) onHeat(m.heat);
+}
+
+// число движущихся людей по комнатам (многоголовая модель): подпись над полом комнаты
+const countSprites = new Map();  // зона -> {sprite, text}
+function drawCounts(counts) {
+  const want = new Map(Object.entries(counts || {}).filter(([, n]) => n > 0));
+  for (const [z, c] of countSprites) {
+    if (!want.has(z) || c.text !== `${want.get(z)}`) { planGroup.remove(c.sprite); countSprites.delete(z); }
+  }
+  for (const [z, n] of want) {
+    if (countSprites.has(z)) continue;
+    const shape = zoneShapes.find((x) => x.name === z);
+    if (!shape) continue;
+    const [cx, cy] = centroid(shape.poly);
+    const sp = label(`${n} чел. двигается`, "#ffb07a", 0.38);
+    sp.position.copy(v3(cx, cy, 0.9));
+    planGroup.add(sp);
+    countSprites.set(z, { sprite: sp, text: `${n}` });
+  }
+}
+
+const fmtDur = (s) => s < 90 ? `${Math.round(s)} с` : s < 5400 ? `${Math.round(s / 60)} мин` : `${(s / 3600).toFixed(1)} ч`;
+
+function drawPerson(now, dt) {
+  const live = person && now - person.seen < PERSON_FRESH_MS;
+  heatMesh.visible = !!live && heatToggle.checked;
+  drawCounts(live ? person.counts : null);
+  if (!live || !person.present) {
+    personGroup.visible = false;
+    if (personLabel) personLabel.visible = false;
+    personBox.textContent = !person ? "Человек: ждём данных трекера"
+      : !live ? "Человек: нет свежих данных"
+      : person.status === "вышел" ? `Человек вышел из квартиры: последнее движение у входной двери, ${fmtDur(person.still_s)} назад`
+      : "Человек: ждём первого движения";
+    return;
+  }
+  const target = v3(person.xy[0], person.xy[1], 0);
+  if (!personPlaced) { personPos.copy(target); personPlaced = true; }
+  const d = target.clone().sub(personPos), dist = d.length();
+  const step = (dist > 3 ? 3.0 : 1.6) * dt;  // м/с: плавно идёт к новой оценке
+  if (dist > step) d.multiplyScalar(step / dist);
+  personPos.add(d);
+  personGroup.position.copy(personPos);
+  personGroup.visible = true;
+  const sure = Math.max(0, Math.min(1, (person.zone_p - 0.4) / 0.4));
+  const col = person.moving ? 0xff8a3d : 0x8fb3d9;
+  bodyMat.color.set(col); bodyMat.emissive.set(col); ringMat.color.set(col);
+  bodyMat.opacity = 0.45 + 0.5 * sure;
+  const r = Math.max(0.35, Math.min(2.0, person.spread_m || 0.5));
+  ring.scale.set(r, r, 1);
+  const pct = `${Math.round(100 * person.zone_p)}%`;
+  const text = person.moving
+    ? `${person.zone} ${pct} · ${person.activity}`
+    : `${person.zone} ${pct} · неподвижен ${fmtDur(person.still_s)}${person.breath_bpm ? ` · дыхание ${Math.round(person.breath_bpm)}/мин` : ""}`;
+  if (text !== personLabelText) {
+    if (personLabel) scene.remove(personLabel);
+    personLabel = label(text, person.moving ? "#ffb07a" : "#b9d3f0", 0.34);
+    scene.add(personLabel);
+    personLabelText = text;
+  }
+  personLabel.visible = true;
+  personLabel.position.set(personPos.x, 2.0, personPos.z);
+  const src = Object.entries(person.sources || {}).filter(([, a]) => a < 3).map(([s]) => s === "board" ? "плата" : "сервер");
+  const many = person.min_people >= 2 ? ` · людей не меньше ${person.min_people} (${person.min_rooms.join(", ")})` : "";
+  // оценка числа людей моделью: на проверке точность низкая — показываем только уверенную и с пометкой
+  const ppl = person.people && person.people.p >= 0.6 ? ` · модель: двигается ≈ ${person.people.n} (оценка, точность низкая)` : "";
+  const ps = "";  // поза: в другой квартире на проверке — уровень случайного угадывания; без своих меток не показываем
+  personBox.textContent = `Человек: ${text} · ±${(person.spread_m || 0).toFixed(1)} м · по ${src.join(" + ") || "—"}, линий с движением ${person.links_active}${many}${ppl}${ps}`;
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/live`);
@@ -298,6 +421,7 @@ function connect() {
     if (m.type === "motion") onMotion(m);
     else if (m.type === "breath") onBreath(m);
     else if (m.type === "pred") onPred(m);
+    else if (m.type === "person") onPerson(m);
     else if (m.type === "phone") {
       phone.position.copy(v3(m.xy[0], m.xy[1], 1.2));
       phone.visible = true;
@@ -326,6 +450,10 @@ new ResizeObserver(resize).observe(view);
 
 renderer.setAnimationLoop((t) => {
   const now = performance.now();
+  const dtFrame = lastFrame ? Math.min(0.1, (now - lastFrame) / 1000) : 0;
+  lastFrame = now;
+  drawPerson(now, dtFrame);
+  const personLive = person && now - person.seen < PERSON_FRESH_MS && person.present;
   if (phone.visible && now - phoneSeen > 3000) phone.visible = false;
   if (now - motionSeen > 3000 && motionSeen) { val.textContent = "нет данных"; fill.style.width = "0%"; motionSeen = 0; }
   // «где движение»: для каждой зоны — максимум по линиям её передатчиков (энергия относительно своего фона)
@@ -338,6 +466,11 @@ renderer.setAnimationLoop((t) => {
   const live = pred && now - pred.seen < 3000;
   const moving = live && pred.moving_p >= MOVE_P_MIN;
   for (const [name, mat] of floors) {
+    if (personLive) {  // трекер: подсвечиваем зоны по вероятности, что человек там
+      const k = Math.max(0, Math.min(1, ((person.zones || {})[name] || 0) / 0.8));
+      mat.emissive?.setRGB(0.1 * k, 0.3 * k, 0.8 * k);
+      continue;
+    }
     if (live) {  // модель: подсвечиваем её зону, если кто-то движется и она уверена
       const k = moving && name === pred.zone ? Math.max(0, Math.min(1, (pred.zone_p - 0.3) / 0.5)) : 0;
       mat.emissive?.setRGB(0.1 * k, 0.35 * k, 0.9 * k);

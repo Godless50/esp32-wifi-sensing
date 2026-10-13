@@ -109,6 +109,7 @@ def build_plan(store: Store) -> dict:
     # ручные правки плана (по словам пользователя) имеют приоритет над обходами
     edited = set()
     zones: list[dict] = []
+    boards: list[dict] = []
     ov_path = overrides_path(store)
     if ov_path.exists():
         try:
@@ -122,6 +123,9 @@ def build_plan(store: Store) -> dict:
                 pts = [(float(x), float(y)) for x, y in poly]
                 if polygon_valid(pts) is None:
                     zones.append({"name": name, "polygon": [[round(x, 3), round(y, 3)] for x, y in pts]})
+            for dev, b in (ov.get("boards") or {}).items():  # места плат-приёмников (первая — начало координат)
+                boards.append({"device_id": str(dev).lower(), "xy": [float(b["xy"][0]), float(b["xy"][1])],
+                               "z": float(b.get("z", 0.8)), "note": str(b.get("note", ""))})
             if isinstance(ov.get("objects"), list):  # ручной список предметов заменяет отмеченные в обходах
                 objects = [{"type": str(o["type"]), "xy": [float(o["xy"][0]), float(o["xy"][1])],
                             "size": [float(v) for v in o.get("size", [0.5, 0.5, 0.8])][:3],
@@ -135,6 +139,7 @@ def build_plan(store: Store) -> dict:
         "zones": zones,
         "objects": objects,
         "board": [0.0, 0.0],
+        "boards": boards,
         "router": router_xy,
         "trajectories": trajectories,
         "skipped": skipped,

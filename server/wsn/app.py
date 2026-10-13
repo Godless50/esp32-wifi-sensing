@@ -6,11 +6,13 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -21,6 +23,7 @@ from .capture import CaptureProtocol
 from .ingest import IngestService
 from .live import LiveHub
 from .geometry import GeometryError, frame_from_points
+from .person import PersonTracker
 from .plan import RoomTracker, build_plan
 from .recorder import Recorder
 from .store import SessionBusy, SessionNotFound, Store
@@ -29,9 +32,16 @@ log = logging.getLogger(__name__)
 TICK_S = 5.0
 
 
+POSTURES = ("стоит", "сидит", "лежит", "разные")
+ARM_STATES = ("опущены", "согнуты", "подняты", "разные")
+
+
 class ZoneLabel(BaseModel):
     count: int = Field(ge=0, le=20)
     activity: str = Field(default="", max_length=40)
+    moving: int | None = Field(default=None, ge=0, le=20)  # сколько из них сейчас двигается (страница /people)
+    posture: str | None = Field(default=None, max_length=10)
+    arms: str | None = Field(default=None, max_length=10)
 
 
 SUBJECT_ACTS = ("покой", "стоит", "машет", "ходит", "мелкие", "переход")
@@ -49,6 +59,7 @@ class OccupancyLabel(BaseModel):
     note: str = Field(default="", max_length=200)
     script: bool = False  # метку поставил сценарий по таймеру, а не человек по памяти
     subject: SubjectLabel | None = None
+    delay_s: float = Field(default=0.0, ge=0, le=900)  # метка вступает в силу позже (все ушли из квартиры)
 
 
 class Prediction(BaseModel):
@@ -61,6 +72,27 @@ class Prediction(BaseModel):
     moving_p: float = Field(ge=0, le=1)
     probs: dict[str, float] = Field(default_factory=dict)
     model: str = Field(default="", max_length=40)
+    # многоголовая модель (ml/train_multi.py): сколько людей двигается, по зонам, поза одного человека
+    people_probs: list[float] | None = Field(default=None, max_length=4)
+    counts_probs: dict[str, list[float]] | None = None
+    pose_probs: dict[str, float] | None = None
+    arms_probs: dict[str, float] | None = None
+    legs_probs: dict[str, float] | None = None
+    angles: list[float] | None = Field(default=None, max_length=4)
+
+
+class WifiSecret(BaseModel):
+    password: str = Field(min_length=8, max_length=63)
+
+
+class ProvisionResult(BaseModel):
+    ok: bool
+    message: str = Field(default="", max_length=300)
+
+
+class ModelPushReq(BaseModel):
+    device_id: str | None = Field(default=None, max_length=17)
+    file: str = Field(default="board_model.bin", max_length=80)  # в data/ml
 
 
 class StartSession(BaseModel):
@@ -68,6 +100,7 @@ class StartSession(BaseModel):
     device_id: str
     duration_s: float | None = None
 
+PLAN_REFRESH_S = 60.0
 
 def create_app(
     hub: LiveHub,
@@ -78,9 +111,23 @@ def create_app(
     recorder: Recorder | None = None,
     default_device: Callable[[], str | None] | None = None,
     pinger=None,
+    pusher=None,
 ) -> FastAPI:
     ui_dir = Path(ui_dir)
     tracker = RoomTracker()
+    person = PersonTracker(  # человек на плане: слушает pred / motion / breath хаба; состояние — между перезапусками
+        publish=hub.publish, state_path=(store.sessions_dir.parent / "run" / "person_state.json") if store else None)
+    hub.listeners.append(person.on_message)
+    # Пароль Wi-Fi для новой платы: только в памяти процесса, 10 минут, отдаётся один раз скрипту на хосте
+    # (tools/provision_web.sh) по токену из data/run/provision.token. На диск не пишется.
+    prov = {"pw": None, "until": 0.0, "result": None}
+    prov_token = secrets.token_hex(16)
+    if store is not None:
+        run_dir = store.sessions_dir.parent / "run"
+        run_dir.mkdir(exist_ok=True)
+        tok = run_dir / "provision.token"
+        tok.write_text(prov_token)
+        os.chmod(tok, 0o600)
     phone_last = {"t": -1e9}
 
     def publish_phone(msg: dict) -> None:
@@ -103,6 +150,15 @@ def create_app(
         else None
     )
 
+    async def plan_refresher() -> None:
+        while True:
+            try:
+                if person.set_plan(await asyncio.to_thread(build_plan, store)):
+                    log.info("person tracker: plan updated, %s", person.snapshot()["grid"])
+            except Exception:
+                log.exception("plan refresh failed")
+            await asyncio.sleep(PLAN_REFRESH_S)
+
     async def ticker() -> None:
         while True:
             await asyncio.sleep(TICK_S)
@@ -119,10 +175,14 @@ def create_app(
             loop = asyncio.get_running_loop()
             transport, _ = await loop.create_datagram_endpoint(lambda: ingest, local_addr=("0.0.0.0", udp_port))
             log.info("UDP ingest on :%d", udp_port)
+            if pusher is not None:
+                pusher.transport = transport
         if recorder is not None:
             tasks.append(asyncio.create_task(ticker()))
         if pinger is not None:
             tasks.append(asyncio.create_task(pinger.run()))
+        if store is not None:
+            tasks.append(asyncio.create_task(plan_refresher()))
         try:
             yield
         finally:
@@ -161,18 +221,81 @@ def create_app(
         """Разметка «кто где»: пишется событием occupancy в активную запись с серверным временем."""
         if req.subject is not None and req.subject.act not in SUBJECT_ACTS:
             raise HTTPException(422, f"subject.act must be one of {SUBJECT_ACTS}")
+        for name, z in req.zones.items():
+            if z.moving is not None and z.moving > z.count:
+                raise HTTPException(422, f"{name}: moving > count")
+            if z.posture is not None and z.posture not in POSTURES:
+                raise HTTPException(422, f"posture must be one of {POSTURES}")
+            if z.arms is not None and z.arms not in ARM_STATES:
+                raise HTTPException(422, f"arms must be one of {ARM_STATES}")
         st = _store()
         s = st.active()
         if s is None:
             raise HTTPException(409, "no active session")
-        ev = {"seq": None, "t": time.monotonic(), "kind": "occupancy",
-              "zones": {k: v.model_dump() for k, v in req.zones.items()}, "note": req.note}
+        ev = {"seq": None, "t": time.monotonic() + req.delay_s, "kind": "occupancy",
+              "zones": {k: v.model_dump(exclude_none=True) for k, v in req.zones.items()}, "note": req.note}
+        if req.delay_s:
+            ev["delay_s"] = req.delay_s
         if req.script:
             ev["script"] = True
         if req.subject is not None:
             ev["subject"] = req.subject.model_dump()
         st.append_event(ev)
         return {"session": s.id}
+
+    @app.post("/api/provision/wifi")
+    def provision_wifi(req: WifiSecret) -> dict:
+        prov.update(pw=req.password, until=time.monotonic() + 600, result=None)
+        return {"ok": True, "expires_s": 600}
+
+    @app.get("/api/provision/status")
+    def provision_status() -> dict:
+        waiting = prov["pw"] is not None and time.monotonic() < prov["until"]
+        return {"waiting": waiting, "result": prov["result"]}
+
+    def _check_token(token: str | None) -> None:
+        if not token or not secrets.compare_digest(token, prov_token):
+            raise HTTPException(403, "token")
+
+    @app.post("/api/provision/take")
+    def provision_take(x_provision_token: str | None = Header(default=None)) -> dict:
+        _check_token(x_provision_token)
+        if prov["pw"] is None or time.monotonic() >= prov["until"]:
+            prov["pw"] = None
+            raise HTTPException(404, "nothing to take")
+        pw, prov["pw"] = prov["pw"], None
+        return {"password": pw}
+
+    @app.post("/api/provision/result")
+    def provision_result(req: ProvisionResult, x_provision_token: str | None = Header(default=None)) -> dict:
+        _check_token(x_provision_token)
+        prov["result"] = req.model_dump()
+        return {"ok": True}
+
+    @app.post("/api/model/push")
+    def model_push(req: ModelPushReq) -> dict:
+        """Send data/ml/<file> (board model blob) to one board, or to every board seen in the last 10 s."""
+        if pusher is None or store is None:
+            raise HTTPException(503, "model push disabled")
+        ml = (store.sessions_dir.parent / "ml").resolve()
+        path = (ml / req.file).resolve()
+        if path.parent != ml or not path.is_file():
+            raise HTTPException(404, "no such model file in data/ml")
+        blob = path.read_bytes()
+        devs = [req.device_id.lower()] if req.device_id else [d.device_id for d in hub.devices() if d.age_s < 10]
+        if not devs:
+            raise HTTPException(409, "no board online")
+        out = []
+        for dev in devs:
+            try:
+                out.append(vars(pusher.start(dev, blob)))
+            except (ValueError, RuntimeError) as e:
+                raise HTTPException(409, f"{dev}: {e}") from e
+        return {"pushes": out}
+
+    @app.get("/api/model/push")
+    def model_push_status() -> dict:
+        return {"pushes": pusher.status() if pusher is not None else []}
 
     @app.post("/api/predict")
     def add_prediction(req: Prediction) -> dict:
@@ -227,7 +350,14 @@ def create_app(
 
     @app.get("/api/plan")
     def api_plan() -> dict:
-        return build_plan(_store())
+        plan = build_plan(_store())
+        person.set_plan(plan)
+        return plan
+
+    @app.get("/api/person")
+    def api_person() -> dict:
+        """Last tracked position of the person, grid size and per-link noise floors (for debugging)."""
+        return person.snapshot()
 
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket) -> None:
@@ -284,6 +414,8 @@ def create_app(
     app.get("/capture/probe")(page("capture/probe.html"))
     app.get("/data")(page("data/index.html"))
     app.get("/scenario")(page("scenario/index.html"))
+    app.get("/people")(page("people/index.html"))
+    app.get("/provision")(page("provision/index.html"))
 
     app.mount("/static", StaticFiles(directory=ui_dir), name="static")
     return app

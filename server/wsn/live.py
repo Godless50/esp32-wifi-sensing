@@ -9,6 +9,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Literal
 
+import logging
+
 import numpy as np
 
 from .breath import SCORE_OK, SPREAD_OK, amplitude_series, score_series
@@ -19,6 +21,7 @@ _LTF_BYTES = 128  # 64 subcarriers x (imag, real) int8
 _REORDER = np.r_[32:64, 0:32]
 _HZ_WINDOW_S = 2.0
 _QUEUE_MAX = 200
+log = logging.getLogger(__name__)
 
 
 def ltf_amplitude(data: bytes, part: Literal["lltf", "ht"]) -> np.ndarray | None:
@@ -157,6 +160,7 @@ class LiveHub:
         self._motion: dict[tuple[str, str], _Motion] = {}
         self._link_times: dict[str, dict[str, deque]] = {}
         self._link_rssi: dict[str, dict[str, int]] = {}
+        self.listeners: list = []  # вызываются с каждым сообщением хаба (трекер человека)
 
     def subscribe(self) -> Subscription:
         sub = Subscription(self)
@@ -292,6 +296,14 @@ class LiveHub:
         self._broadcast(msg)
 
     def _broadcast(self, msg: dict) -> None:
+        self._fanout(msg)
+        for fn in list(self.listeners):  # после рассылки: ответ слушателя идёт клиентам следом за исходным
+            try:
+                fn(msg)
+            except Exception:  # слушатель не должен ронять приём пакетов
+                log.exception("live listener failed")
+
+    def _fanout(self, msg: dict) -> None:
         try:
             current = asyncio.get_running_loop()
         except RuntimeError:

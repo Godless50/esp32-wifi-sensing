@@ -82,6 +82,43 @@ def wait_status(con, attempts: int = 6, pause: float = 1.0) -> dict[str, str] | 
     return None
 
 
+def provision(port: str, ssid: str, bssid: str, host: str, password: str, udp_port: int = 5005,
+              keys: str = "/data/device_keys.json", wait: float = 40.0, links: list[str] | None = None) -> tuple[int, str]:
+    """Key, Wi-Fi, server (and optional extra links) into the board's NVS; returns (exit code, message)."""
+    con = Console(port)
+    con.send("")
+    st = wait_status(con)
+    if st is None or "mac" not in st:
+        return 2, "no STATUS from board (is the firmware flashed?)"
+    mac = st["mac"].lower()
+    ks = KeyStore(Path(keys))
+    # Ключ меняется при каждом провижининге: сервер по смене ключа сбрасывает счётчик загрузок
+    # устройства (нужно после стирания флеша, когда boot_id на плате снова начинается с 1).
+    key = secrets.token_bytes(32)
+    ks.set(mac, key)
+    steps = [
+        ("key set " + key.hex(), "OK key"),
+        (f"wifi set {console_quote(ssid)} {console_quote(password)} {bssid.lower()}", "OK wifi"),
+        (f"server set {console_quote(host)} {udp_port}", "OK server"),
+    ]
+    if links:
+        steps.append(("links set " + ",".join(links), "OK links"))
+    for cmd, ok in steps:
+        con.send(cmd)
+        if con.expect(ok, 3.0) is None:
+            shown = cmd.split()[0] + " " + cmd.split()[1]  # не печатать пароль/ключ
+            return 3, f"board did not confirm '{shown}'"
+    con.send("reboot")
+    time.sleep(3)
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        st = con.status()
+        if st and st.get("wifi") == "CONNECTED":
+            return 0, f"{mac}: wifi CONNECTED, ip {st.get('ip', '?')}"
+        time.sleep(2)
+    return 4, f"{mac}: board did not reach wifi=CONNECTED (wrong password?)"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default="/dev/ttyACM0")
@@ -93,43 +130,9 @@ def main() -> int:
     ap.add_argument("--wait", type=float, default=40.0, help="seconds to wait for wifi=CONNECTED")
     a = ap.parse_args()
     password = os.environ.get("WSN_WIFI_PASS") or getpass.getpass("Wi-Fi password: ")
-
-    con = Console(a.port)
-    con.send("")
-    st = wait_status(con)
-    if st is None or "mac" not in st:
-        print("ERROR: no STATUS from board (is the firmware flashed?)", file=sys.stderr)
-        return 2
-    mac = st["mac"].lower()
-    ks = KeyStore(Path(a.keys))
-    # Ключ меняется при каждом провижининге: сервер по смене ключа сбрасывает счётчик загрузок
-    # устройства (нужно после стирания флеша, когда boot_id на плате снова начинается с 1).
-    key = secrets.token_bytes(32)
-    ks.set(mac, key)
-    print(f"new key generated for {mac}")
-    steps = [
-        ("key set " + key.hex(), "OK key"),
-        (f"wifi set {console_quote(a.ssid)} {console_quote(password)} {a.bssid.lower()}", "OK wifi"),
-        (f"server set {console_quote(a.host)} {a.udp_port}", "OK server"),
-    ]
-    for cmd, ok in steps:
-        con.send(cmd)
-        if con.expect(ok, 3.0) is None:
-            shown = cmd.split()[0] + " " + cmd.split()[1]  # не печатать пароль/ключ
-            print(f"ERROR: board did not confirm '{shown}'", file=sys.stderr)
-            return 3
-    con.send("reboot")
-    time.sleep(3)
-    deadline = time.monotonic() + a.wait
-    while time.monotonic() < deadline:
-        st = con.status()
-        if st:
-            print("STATUS", " ".join(f"{k}={v}" for k, v in st.items()))
-            if st.get("wifi") == "CONNECTED":
-                return 0
-        time.sleep(2)
-    print("ERROR: board did not reach wifi=CONNECTED", file=sys.stderr)
-    return 4
+    rc, msg = provision(a.port, a.ssid, a.bssid, a.host, password, a.udp_port, a.keys, a.wait)
+    print(("ERROR: " if rc else "") + msg, file=sys.stderr if rc else sys.stdout)
+    return rc
 
 
 if __name__ == "__main__":

@@ -35,25 +35,27 @@
   #view { flex: 1; position: relative; min-height: 0; }
   #view canvas { display: block; width: 100%; height: 100%; }
   #note { position: absolute; left: 12px; bottom: 10px; font-size: 12px; color: var(--muted); background: color-mix(in srgb, var(--panel) 85%, transparent); padding: 6px 10px; border-radius: 6px; max-width: calc(100% - 24px); }
+  #personBox { position: absolute; left: 12px; top: 10px; font-size: 13px; font-weight: 600; color: var(--text); background: color-mix(in srgb, var(--panel) 85%, transparent); padding: 6px 10px; border-radius: 6px; max-width: calc(100% - 24px); }
   @media (max-width: 640px) { header { padding: 8px 12px; } #conn { margin-left: 0; } }
 </style>
 </head>
 <body>
 <header>
   <h1>Квартира</h1>
-  <nav><a href="/device">Плата</a><a href="/capture">Съёмка</a><a href="/scenario">Сценарий</a><a href="/data">Данные</a></nav>
+  <nav><a href="/device">Плата</a><a href="/capture">Съёмка</a><a href="/scenario">Сценарий</a><a href="/people">Кто где</a><a href="/data">Данные</a></nav>
   <div class="group">
     <button id="top" aria-pressed="false">Сверху</button>
     <button id="persp" aria-pressed="true">Перспектива</button>
   </div>
   <label><input type="checkbox" id="traj"> траектории</label>
+  <label title="Клетки пола, где может быть человек: чем ярче, тем вероятнее"><input type="checkbox" id="heat" checked> где может быть</label>
   <button id="reload" title="Перечитать план">Обновить план</button>
   <div id="motion" title="Движение по CSI: 1 ≈ покой за последнюю минуту">
     <span>Движение</span><div class="bar"><div class="fill"></div></div><span class="val">—</span><span id="where" title="Зона, рядом с передатчиком которой линия связи сильнее всего отклонилась от своего фона"></span><span id="board" title="Ответ модели, которая работает на самой плате ESP32-S3"></span><span id="breath" title="Медленные периодичные изменения CSI 6–30 раз в минуту у неподвижного человека рядом с линией"></span>
   </div>
   <span id="conn">подключение…</span>
 </header>
-<div id="view"><div id="note">загрузка плана…</div></div>
+<div id="view"><div id="personBox">Человек: ждём данных трекера</div><div id="note">загрузка плана…</div></div>
 <script type="module" src="/static/scene/scene.js"></script>
 </body>
 </html>

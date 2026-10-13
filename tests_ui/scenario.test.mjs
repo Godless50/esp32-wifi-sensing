@@ -36,7 +36,7 @@ Object.defineProperty(w.navigator, "wakeLock", { value: { request: async () => (
 
 w.eval(src);
 const $ = (id) => w.document.getElementById(id);
-assert.match($("total").textContent, /37 шагов/);
+assert.match($("total").textContent, /62 шагов/);  // 12 точек по умолчанию (спальня и комната включены)
 $("start").click();
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -59,7 +59,7 @@ assert.equal(labels[0].body.script, false);
 assert.equal(labels.at(-1).body.note, "сценарий: конец");
 
 const acts = labels.filter((l) => l.body.subject && l.body.subject.act !== "переход");
-assert.equal(acts.length, 7 * 4 + 1, "7 точек × 4 действия + покой на диване");
+assert.equal(acts.length, 12 * 4 + 1, "12 точек × 4 действия + покой на диване");
 for (let i = 1; i < labels.length; i++) {
   const prev = labels[i - 1].body, cur = labels[i].body;
   // между двумя действиями всегда стоит метка перехода: окна смены поведения не попадут в обучение
@@ -81,5 +81,5 @@ for (const l of acts) {
 }
 // точки перемешаны и каждая встречается ровно один раз
 const order = acts.filter((l) => l.body.subject.act !== "покой").map((l) => `${l.body.subject.zone}/${l.body.subject.place}`);
-assert.equal(new Set(order).size, 7);
+assert.equal(new Set(order).size, 12);
 console.log(`ok: ${labels.length} меток, ${acts.length} действий, виртуально ${(now / 60000).toFixed(1)} мин; порядок: ${[...new Set(order)].join(", ")}`);
