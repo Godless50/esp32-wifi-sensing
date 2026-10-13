@@ -25,9 +25,43 @@ static uint8_t s_source;
 static csi_counters_t s_cnt;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* Диагностика: кто ещё на канале даёт CSI (видно в promiscuous). Не влияет на отправку. */
+static csi_src_stat_t s_src[CSI_SRC_MAX];
+static size_t s_src_n;
+
+static void src_note(const uint8_t mac[6], const wifi_pkt_rx_ctrl_t *rx, uint16_t len)
+{
+    size_t i;
+    for (i = 0; i < s_src_n && memcmp(s_src[i].mac, mac, 6) != 0; i++) {
+    }
+    if (i == s_src_n) {
+        if (s_src_n == CSI_SRC_MAX) return;
+        memset(&s_src[i], 0, sizeof(s_src[i]));
+        memcpy(s_src[i].mac, mac, 6);
+        s_src_n++;
+    }
+    s_src[i].frames++;
+    if (rx->sig_mode == 1 && len >= 256) s_src[i].ht++;
+    s_src[i].rssi_sum += rx->rssi;
+}
+
+size_t csi_capture_sources(csi_src_stat_t *out, size_t cap, bool reset)
+{
+    portENTER_CRITICAL(&s_mux);
+    size_t n = s_src_n < cap ? s_src_n : cap;
+    memcpy(out, s_src, n * sizeof(*out));
+    if (reset) s_src_n = 0;
+    portEXIT_CRITICAL(&s_mux);
+    return n;
+}
+
 static void csi_cb(void *ctx, wifi_csi_info_t *info)
 {
-    if (!info || !info->buf || memcmp(info->mac, s_bssid, 6) != 0) return;
+    if (!info || !info->buf) return;
+    portENTER_CRITICAL(&s_mux);
+    src_note(info->mac, &info->rx_ctrl, info->len);
+    portEXIT_CRITICAL(&s_mux);
+    if (memcmp(info->mac, s_bssid, 6) != 0) return;
     uint16_t len = info->len > CSI_MAX_LEN ? CSI_MAX_LEN : info->len;
     const wifi_pkt_rx_ctrl_t *rx = &info->rx_ctrl;
     bool match = s_source == 1 || (rx->sig_mode == 1 && len >= 256);

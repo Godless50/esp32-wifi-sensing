@@ -12,6 +12,8 @@ VERSION = 1
 TYPE_CSI = 1
 TYPE_PRED = 2
 TYPE_TELEM = 3
+TYPE_CSI_SRC = 4  # CSI-кадры с MAC передатчика (несколько линий связи)
+CSI_TYPES = (TYPE_CSI, TYPE_CSI_SRC)
 HEADER_LEN = 21
 HMAC_LEN = 16
 MAX_DATAGRAM = 1400
@@ -34,6 +36,7 @@ class CsiFrame:
     sig_mode: int
     cwb: int
     data: bytes
+    src: str = ""  # MAC передатчика (только TYPE_CSI_SRC; иначе — точка доступа платы)
 
 
 @dataclass(frozen=True)
@@ -97,15 +100,21 @@ def parse_packet(buf: bytes, key: bytes) -> Packet:
     off = HEADER_LEN
     frames: list[CsiFrame] = []
     telemetry: Telemetry | None = None
-    if ptype == TYPE_CSI:
+    if ptype in CSI_TYPES:
         for _ in range(n):
             if off + _FRAME.size > len(body):
                 raise ProtocolError("length: frame header")
             t_us, rssi, noise, sig_mode, cwb, dlen = _FRAME.unpack_from(body, off)
             off += _FRAME.size
+            src = ""
+            if ptype == TYPE_CSI_SRC:
+                if off + 6 > len(body):
+                    raise ProtocolError("length: frame src")
+                src = _mac_str(body[off : off + 6])
+                off += 6
             if off + dlen > len(body):
                 raise ProtocolError("length: frame data")
-            frames.append(CsiFrame(t_us, rssi, noise, sig_mode, cwb, bytes(body[off : off + dlen])))
+            frames.append(CsiFrame(t_us, rssi, noise, sig_mode, cwb, bytes(body[off : off + dlen]), src))
             off += dlen
     elif ptype == TYPE_TELEM:
         if n != 1 or off + _TELEM.size > len(body):
@@ -129,11 +138,13 @@ def encode_packet(
     telemetry: Telemetry | None = None,
 ) -> bytes:
     parts: list[bytes] = []
-    if type == TYPE_CSI:
+    if type in CSI_TYPES:
         frames = frames or []
         n = len(frames)
         for f in frames:
             parts.append(_FRAME.pack(f.t_us, f.rssi, f.noise, f.sig_mode, f.cwb, len(f.data)))
+            if type == TYPE_CSI_SRC:
+                parts.append(_mac_bytes(f.src))
             parts.append(f.data)
     elif type == TYPE_TELEM:
         if telemetry is None:

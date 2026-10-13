@@ -1,5 +1,6 @@
 // Emits hex-encoded golden packets for server/tests/test_c_golden.py (one packet per line).
 #include <stdio.h>
+#include <string.h>
 
 #include "hmac_openssl.h"
 #include "wsn_proto.h"
@@ -29,11 +30,22 @@ int main(void)
     if (n < 0) return 1;
     hex(out, n);
 
-    /* seq is now 8 */
+    /* seq is now 8: telemetry; seq 9: CSI with transmitter MACs (appended as 3rd line below) */
     wsn_telem_t t = {.csi_hz = 98.5f, .drop_ratio = 0.02f, .rssi_avg = -44, .heap_free = 120000,
                      .psram_free = 8000000, .uptime_s = 3600, .fw_ver = 1, .model_ver = 0,
                      .wifi_state = 2};
     n = wsn_encode_telem(&c, &t, out, sizeof(out));
+    if (n < 0) return 1;
+    hex(out, n);
+
+    /* seq is now 9 */
+    for (int i = 0; i < 2; i++) {
+        const uint8_t src[6] = {0x98, 0xb3, 0xef, 0x02, 0xda, (uint8_t)(0x28 + i)};
+        memcpy(f[i].src, src, 6);
+        f[i].sig_mode = (uint8_t)i;
+        f[i].len = i ? 256 : 128;
+    }
+    n = wsn_encode_csi_src(&c, f, 2, out, sizeof(out));
     if (n < 0) return 1;
     hex(out, n);
     return 0;

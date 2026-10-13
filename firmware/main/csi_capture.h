@@ -16,6 +16,17 @@ typedef struct {
     uint32_t rssi_n;
 } csi_counters_t;
 
+#define CSI_SRC_MAX 24
+
+typedef struct {
+    uint8_t mac[6];
+    uint32_t frames, ht;
+    int32_t rssi_sum;
+} csi_src_stat_t;
+
+/* Per-transmitter CSI statistics since last reset (diagnostics for extra links). */
+size_t csi_capture_sources(csi_src_stat_t *out, size_t cap, bool reset);
+
 /* Must be called after esp_wifi_start(). csi_source: 0 = ht, 1 = lltf. */
 esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source);
 void csi_capture_counters(csi_counters_t *out);

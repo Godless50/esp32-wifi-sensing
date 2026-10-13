@@ -1,5 +1,6 @@
 #include "wsn_proto.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 static uint8_t *put_u8(uint8_t *p, uint8_t v) { *p++ = v; return p; }
@@ -44,19 +45,19 @@ static int finish(wsn_ctx_t *c, uint8_t *out, uint8_t *end)
     return (int)(body + WSN_HMAC_LEN);
 }
 
-static size_t csi_size(const wsn_csi_frame_t *frames, size_t n)
+static size_t csi_size(const wsn_csi_frame_t *frames, size_t n, size_t hdr)
 {
     size_t total = WSN_HEADER_LEN + WSN_HMAC_LEN;
-    for (size_t i = 0; i < n; i++) total += WSN_FRAME_HDR_LEN + frames[i].len;
+    for (size_t i = 0; i < n; i++) total += hdr + frames[i].len;
     return total;
 }
 
-size_t wsn_frames_fit(const wsn_csi_frame_t *frames, size_t n)
+static size_t frames_fit(const wsn_csi_frame_t *frames, size_t n, size_t hdr)
 {
     size_t total = WSN_HEADER_LEN + WSN_HMAC_LEN;
     size_t k = 0;
     while (k < n && k < WSN_MAX_FRAMES) {
-        size_t next = total + WSN_FRAME_HDR_LEN + frames[k].len;
+        size_t next = total + hdr + frames[k].len;
         if (next > WSN_MAX_DATAGRAM) break;
         total = next;
         k++;
@@ -64,14 +65,22 @@ size_t wsn_frames_fit(const wsn_csi_frame_t *frames, size_t n)
     return k;
 }
 
-int wsn_encode_csi(wsn_ctx_t *ctx, const wsn_csi_frame_t *frames, size_t n, uint8_t *out, size_t cap)
+size_t wsn_frames_fit(const wsn_csi_frame_t *frames, size_t n) { return frames_fit(frames, n, WSN_FRAME_HDR_LEN); }
+
+size_t wsn_frames_fit_src(const wsn_csi_frame_t *frames, size_t n)
+{
+    return frames_fit(frames, n, WSN_FRAME_SRC_HDR_LEN);
+}
+
+static int encode_csi(wsn_ctx_t *ctx, const wsn_csi_frame_t *frames, size_t n, uint8_t *out, size_t cap,
+                      bool with_src)
 {
     if (!ctx || !ctx->hmac || (!frames && n) || !out) return -1;
     if (n > WSN_MAX_FRAMES) return -2;
-    size_t need = csi_size(frames, n);
+    size_t need = csi_size(frames, n, with_src ? WSN_FRAME_SRC_HDR_LEN : WSN_FRAME_HDR_LEN);
     if (need > WSN_MAX_DATAGRAM) return -3;
     if (need > cap) return -4;
-    uint8_t *p = put_header(ctx, out, WSN_TYPE_CSI, (uint8_t)n);
+    uint8_t *p = put_header(ctx, out, with_src ? WSN_TYPE_CSI_SRC : WSN_TYPE_CSI, (uint8_t)n);
     for (size_t i = 0; i < n; i++) {
         const wsn_csi_frame_t *f = &frames[i];
         p = put_u64(p, f->t_us);
@@ -80,10 +89,24 @@ int wsn_encode_csi(wsn_ctx_t *ctx, const wsn_csi_frame_t *frames, size_t n, uint
         p = put_u8(p, f->sig_mode);
         p = put_u8(p, f->cwb);
         p = put_u16(p, f->len);
+        if (with_src) {
+            memcpy(p, f->src, 6);
+            p += 6;
+        }
         memcpy(p, f->data, f->len);
         p += f->len;
     }
     return finish(ctx, out, p);
+}
+
+int wsn_encode_csi(wsn_ctx_t *ctx, const wsn_csi_frame_t *frames, size_t n, uint8_t *out, size_t cap)
+{
+    return encode_csi(ctx, frames, n, out, cap, false);
+}
+
+int wsn_encode_csi_src(wsn_ctx_t *ctx, const wsn_csi_frame_t *frames, size_t n, uint8_t *out, size_t cap)
+{
+    return encode_csi(ctx, frames, n, out, cap, true);
 }
 
 int wsn_encode_telem(wsn_ctx_t *ctx, const wsn_telem_t *t, uint8_t *out, size_t cap)

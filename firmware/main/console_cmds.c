@@ -7,6 +7,8 @@
 #include "esp_console.h"
 #include "esp_mac.h"
 #include "esp_system.h"
+#include "esp_wifi.h"
+#include "csi_capture.h"
 #include "wifi_mgr.h"
 #include "wsn_util.h"
 
@@ -124,6 +126,60 @@ static int cmd_status(int argc, char **argv)
     return 0;
 }
 
+/* promisc on|off — runtime only: CSI from all transmitters on the channel (diagnostics). */
+static int cmd_promisc(int argc, char **argv)
+{
+    if (argc != 2 || (strcmp(argv[1], "on") && strcmp(argv[1], "off"))) {
+        puts("ERR usage: promisc on|off");
+        return 1;
+    }
+    bool on = strcmp(argv[1], "on") == 0;
+    if (on) {
+        wifi_promiscuous_filter_t f = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA};
+        esp_wifi_set_promiscuous_filter(&f);
+    }
+    esp_err_t err = esp_wifi_set_promiscuous(on);
+    printf("%s promisc %s\n", err == ESP_OK ? "OK" : "ERR", esp_err_to_name(err));
+    return err != ESP_OK;
+}
+
+/* csi_src [reset] — CSI frames per transmitter MAC since last reset. */
+static int cmd_csi_src(int argc, char **argv)
+{
+    static csi_src_stat_t st[CSI_SRC_MAX];
+    bool reset = argc == 2 && strcmp(argv[1], "reset") == 0;
+    size_t n = csi_capture_sources(st, CSI_SRC_MAX, reset);
+    for (size_t i = 0; i < n; i++) {
+        char m[18];
+        wsn_format_mac(st[i].mac, m);
+        printf("SRC %s frames=%lu ht=%lu rssi=%ld\n", m, (unsigned long)st[i].frames, (unsigned long)st[i].ht,
+               st[i].frames ? (long)(st[i].rssi_sum / (int32_t)st[i].frames) : 0L);
+    }
+    printf("SRC_END n=%u\n", (unsigned)n);
+    return 0;
+}
+
+/* scan — APs on all channels (briefly interrupts CSI). */
+static int cmd_scan(int argc, char **argv)
+{
+    wifi_scan_config_t sc = {.show_hidden = true};
+    esp_err_t err = esp_wifi_scan_start(&sc, true);
+    if (err != ESP_OK) {
+        printf("ERR scan %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    uint16_t n = 32;
+    static wifi_ap_record_t recs[32];
+    esp_wifi_scan_get_ap_records(&n, recs);
+    for (uint16_t i = 0; i < n; i++) {
+        char m[18];
+        wsn_format_mac(recs[i].bssid, m);
+        printf("AP %s ch=%u rssi=%d ssid=%s\n", m, recs[i].primary, recs[i].rssi, (const char *)recs[i].ssid);
+    }
+    printf("AP_END n=%u\n", n);
+    return 0;
+}
+
 static int cmd_reboot(int argc, char **argv)
 {
     puts("OK reboot");
@@ -150,6 +206,9 @@ esp_err_t console_start(const wsn_settings_t *active, csi_hz_fn_t csi_hz)
         {.command = "csi_source", .help = "csi_source set ht|lltf", .func = cmd_csi_source},
         {.command = "status", .help = "print STATUS line", .func = cmd_status},
         {.command = "reboot", .help = "restart", .func = cmd_reboot},
+        {.command = "promisc", .help = "promisc on|off (runtime)", .func = cmd_promisc},
+        {.command = "csi_src", .help = "csi_src [reset]: CSI per transmitter", .func = cmd_csi_src},
+        {.command = "scan", .help = "scan access points", .func = cmd_scan},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
     return esp_console_start_repl(repl);

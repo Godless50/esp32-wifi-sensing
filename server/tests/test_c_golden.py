@@ -37,3 +37,15 @@ def test_c_telem_packet():
         -44, 120_000, 8_000_000, 3600, 1, 0, 2)
     assert buf == encode_packet(TYPE_TELEM, MAC, 0xDEADBEEF, 8, KEY, telemetry=Telemetry(
         t.csi_hz, t.drop_ratio, -44, 120_000, 8_000_000, 3600, 1, 0, 2))
+
+
+def test_c_csi_src_packet():
+    from wsn.protocol import TYPE_CSI_SRC
+    buf = _lines()[2]
+    p = parse_packet(buf, KEY)
+    data = bytes(j & 0xFF for j in range(256))
+    expected = [CsiFrame(1_000_000, -45, -92, 0, 0, data[:128], src="98:b3:ef:02:da:28"),
+                CsiFrame(1_000_001, -45, -92, 1, 0, data, src="98:b3:ef:02:da:29")]
+    assert (p.type, p.seq) == (TYPE_CSI_SRC, 9)
+    assert p.frames == expected
+    assert buf == encode_packet(TYPE_CSI_SRC, MAC, 0xDEADBEEF, 9, KEY, frames=expected)

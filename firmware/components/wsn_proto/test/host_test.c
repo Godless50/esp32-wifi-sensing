@@ -79,8 +79,28 @@ static void test_telem_len(void)
     assert(out[5] == WSN_TYPE_TELEM && out[20] == 1 && c.seq == 1);
 }
 
+static void test_src_variant(void)
+{
+    wsn_csi_frame_t f[12];
+    fill(f, 12, 256);
+    assert(wsn_frames_fit_src(f, 10) == 4); /* 21+16+4*276=1141, +276 > 1400 */
+    fill(f, 12, 128);
+    assert(wsn_frames_fit_src(f, 10) == 9); /* 37 + 9*148 = 1369 */
+    fill(f, 4, 256);
+    f[1].src[5] = 0x7d;
+    uint8_t out[WSN_MAX_DATAGRAM];
+    wsn_ctx_t c = make_ctx();
+    int r = wsn_encode_csi_src(&c, f, 4, out, sizeof(out));
+    assert(r == 21 + 4 * 276 + 16);
+    assert(out[5] == WSN_TYPE_CSI_SRC && out[20] == 4);
+    assert(out[21 + 276 + 14 + 5] == 0x7d); /* src MAC follows the 14-byte frame header */
+    fill(f, 5, 256);
+    assert(wsn_encode_csi_src(&c, f, 5, out, sizeof(out)) < 0); /* 5 frames with src exceed 1400 */
+}
+
 int main(void)
 {
+    test_src_variant();
     test_frames_fit();
     test_encode_len_and_seq();
     test_encode_small_cap_fails();
