@@ -25,6 +25,9 @@ Online learning, every --adapt-min minutes when the buffer has enough fresh wind
   Home Assistant (optional, data/labels/ha.jsonl from tools/ha_labels.py): live windows recorded while nobody
   was home for 10 min are a teacher independent of the radio. On them "somebody moves" is a false alarm; the guard
   refuses an update that raises that rate by more than --tol (needs >= --min-ha such windows, else not checked).
+  Honest check (--heldout, data/ml/heldout_v1.npz from build_seq.py): labelled sessions that are NOT in the base
+  model's trained_on. The guard refuses an update that raises "moving" on their still windows by more than --tol;
+  the "moving" head's temperature is fitted on them (on VAL_SESSIONS the model looks fine because it trained there).
   Every attempt is appended to data/ml/live_model/history.jsonl.
 
 Extras (--extras, ml/train_multi.py ensemble): number of moving people (total and per zone), posture, arms / legs
@@ -229,10 +232,38 @@ class Learner:
         self.val = np.isin(sess, VAL_SESSIONS) & (self.anchor_y[0] >= 0)
         self.train_anchor = ~np.isin(sess, VAL_SESSIONS)
         self.ref = load_model(Path(a.reference))[1] if a.reference and Path(a.reference, "meta.json").exists() else None
+        self.ho_X, self.ho_still = self.load_heldout(Path(a.heldout) if a.heldout else None)
         self.last_push = 0.0
         self.temp = self.fit_temps(self.nets)  # не из meta.json: правило подбора могло измениться
         log.info("model v%s (%d nets), anchor %d windows, temperature %s", self.meta["version"], len(self.nets),
                  len(self.anchor_X), self.temp)
+
+    def load_heldout(self, path: Path | None):
+        """Still windows ("nobody moves") of labelled sessions outside trained_on; None when there are none."""
+        if path is None or not path.exists():
+            log.info("heldout: %s not found, honest check off", path)
+            return None, None
+        d = np.load(path)
+        _, _, ym = labels(d)
+        keep = ~np.isin(d["session"], self.meta.get("trained_on", [])) & (ym >= 0)
+        if not keep.any():
+            log.info("heldout: no labelled windows outside trained_on in %s", path)
+            return None, None
+        X = d["X"][keep].astype(np.float32)
+        log.info("heldout: %d windows from %d sessions outside trained_on (%d still)", len(X),
+                 len(np.unique(d["session"][keep])), int((ym[keep] == 0).sum()))
+        return X, ym[keep]
+
+    def fit_moving_temp(self, nets) -> float:
+        if self.ho_X is None:  # fit_temperature сам вернёт 1.0 при одном классе или < 20 окнах
+            return 1.0
+        return round(fit_temperature(ensemble(nets, self.ho_X)[2], self.ho_still), 3)
+
+    def false_moving(self, nets) -> float | None:
+        """Share of still heldout windows the nets call moving (p > 0.5, before temperature)."""
+        if self.ho_X is None or not (self.ho_still == 0).any():
+            return None
+        return float((ensemble(nets, self.ho_X[self.ho_still == 0])[2] > 0.5).mean())
 
     def fit_temps(self, nets) -> dict:
         """Per-head temperature on labelled sessions the model was NOT trained on; none -> 1.0 (no correction).
@@ -241,13 +272,15 @@ class Learner:
         sessions it never saw the same model was overconfident (T > 6, data/eval/calib-1791892839-heldout.json).
         A temperature fitted on training data makes the answers worse, so it is not used."""
         honest = self.val & ~np.isin(self.anchor_session, self.meta.get("trained_on", []))
+        moving = self.fit_moving_temp(nets)
         if not honest.any():
-            log.info("temperature: no labelled session outside trained_on -> 1.0")
-            return {"activity": 1.0, "zone": 1.0}
+            log.info("temperature: no labelled activity/zone session outside trained_on -> 1.0")
+            return {"activity": 1.0, "zone": 1.0, "moving": moving}
         X, (ya, yz, _) = self.anchor_X[honest], (v[honest] for v in self.anchor_y)
         pa, pz, _ = ensemble(nets, X)
         z = yz >= 0
-        return {"activity": round(fit_temperature(pa, ya), 3), "zone": round(fit_temperature(pz[z], yz[z]), 3)}
+        return {"activity": round(fit_temperature(pa, ya), 3), "zone": round(fit_temperature(pz[z], yz[z]), 3),
+                "moving": moving}
 
     def teacher(self) -> dict | None:
         """Tracker state right now: link-only zone (physics), moving / still, lower bound of people."""
@@ -269,6 +302,7 @@ class Learner:
         temp = self.temp
         pa = apply_temperature(pa, temp.get("activity", 1.0))
         pz = apply_temperature(pz, temp.get("zone", 1.0))
+        pm = apply_temperature(pm, temp.get("moving", 1.0))
         ai, zi = int(pa[0].argmax()), int(pz[0].argmax())
         body = {"device_id": dev, "zone": meta["zones"][zi], "zone_p": round(float(pz[0, zi]), 3),
                 "activity": meta["activities"][ai], "activity_p": round(float(pa[0, ai]), 3),
@@ -342,6 +376,8 @@ class Learner:
             empty = np.array(ha.mask(t_wall), dtype=bool) if len(t_wall) == len(L) else np.zeros(len(L), bool)
             ha_rec = {"nobody_home_windows": int(empty.sum())}
             ha_ok = True
+            fm_old, fm_new = self.false_moving(nets), self.false_moving(cand)
+            ho_ok = fm_old is None or fm_new <= fm_old + a.tol
             if empty.sum() >= a.min_ha:
                 fa_old = float((ensemble(nets, L[empty])[2] > 0.5).mean())
                 fa_new = float((ensemble(cand, L[empty])[2] > 0.5).mean())
@@ -349,13 +385,14 @@ class Learner:
                 ha_rec.update({"false_moving_old": round(fa_old, 4), "false_moving_new": round(fa_new, 4)})
             ok = (new_s["zone"] >= old_s["zone"] - a.tol and new_s["activity"] >= old_s["activity"] - a.tol
                   and live_new >= live_old - a.tol and drift <= a.max_drift
-                  and share <= max(ref_share + 0.15, 0.6) and cal_ok and ha_ok)
+                  and share <= max(ref_share + 0.15, 0.6) and cal_ok and ha_ok and ho_ok)
             rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "from": meta["version"], "live_windows": int(len(L)),
                    "teacher_activity": int((ya_l[keep] >= 0).sum()), "teacher_zone": int((yz_l[keep] >= 0).sum()),
                    "teacher_moving": int((ym_l[keep] >= 0).sum()), "old": old_s, "new": new_s,
                    "live_teacher_zone": {"old": round(float(live_old), 3), "new": round(float(live_new), 3)},
                    "drift_from_reference": round(drift, 3), "top_class_share": round(share, 3),
-                   "calibration_ok": bool(cal_ok), "home_assistant": ha_rec, "accepted": bool(ok),
+                   "calibration_ok": bool(cal_ok), "home_assistant": ha_rec,
+                   "heldout_false_moving": {"old": fm_old, "new": fm_new}, "accepted": bool(ok),
                    "seconds": round(time.time() - t0)}
             if ok:
                 ver = int(time.time())
@@ -491,6 +528,8 @@ def main() -> None:
     ap.add_argument("--ece-tol", type=float, default=0.02, help="max ECE growth per head on the held-out sessions")
     ap.add_argument("--ha-labels", default="../data/labels/ha.jsonl", help="tools/ha_labels.py journal (optional)")
     ap.add_argument("--min-ha", type=int, default=120, help="nobody-home live windows needed to check false alarms")
+    ap.add_argument("--heldout", default="../data/ml/heldout_v1.npz",
+                    help="build_seq.py dataset of labelled sessions outside trained_on (honest check)")
     ap.add_argument("--extras", default="../data/ml/live_model_v4", help="train_multi.py ensemble (people, pose)")
     ap.add_argument("--devices", default="7c:4f:ad:bc:9b:54", help="boards the models were trained for")
     ap.add_argument("--geo-conf", type=float, default=0.8, help="link-only zone certainty for a teacher label")
