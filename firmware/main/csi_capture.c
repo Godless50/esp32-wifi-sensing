@@ -19,7 +19,7 @@ typedef struct __attribute__((packed)) {
     uint8_t src[6];
 } item_hdr_t;
 
-#define RING_BYTES (160 * 1024) /* ~4 s at 100 Hz x 400 B */
+#define RING_BYTES (512 * 1024) /* ~10 s при ~180 кадрах/с: сеть Wi-Fi замирает на 6-9 с раз в минуту (13.10) */
 #define RING_BYTES_INTERNAL (48 * 1024)
 
 static RingbufHandle_t s_ring;
