@@ -14,3 +14,5 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_SPIRAM_SPEED_80M=y
+# приём Wi-Fi/CSI из IRAM: было падение «Cache disabled but cached memory region accessed» в wDev_SnifferRxData
+CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
