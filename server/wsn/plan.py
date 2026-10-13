@@ -126,6 +126,7 @@ def build_plan(store: Store) -> dict:
                 objects = [{"type": str(o["type"]), "xy": [float(o["xy"][0]), float(o["xy"][1])],
                             "size": [float(v) for v in o.get("size", [0.5, 0.5, 0.8])][:3],
                             "rot": float(o.get("rot", 0.0)), "z": float(o.get("z", 0.0)),  # z — высота низа (ТВ на стене)
+                            "mac": str(o.get("mac") or "").lower(),  # передатчик дополнительной линии связи
                             "session": "edited"} for o in ov["objects"]]
         except (ValueError, TypeError, AttributeError):
             warnings["overrides"] = "plan_overrides.json is malformed; ignored"

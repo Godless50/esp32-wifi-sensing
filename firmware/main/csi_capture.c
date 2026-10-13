@@ -15,6 +15,7 @@ typedef struct __attribute__((packed)) {
     int8_t rssi, noise;
     uint8_t sig_mode, cwb;
     uint16_t len;
+    uint8_t src[6];
 } item_hdr_t;
 
 #define RING_BYTES (160 * 1024) /* ~4 s at 100 Hz x 400 B */
@@ -22,6 +23,11 @@ typedef struct __attribute__((packed)) {
 static RingbufHandle_t s_ring;
 static uint8_t s_bssid[6];
 static uint8_t s_source;
+#define MAX_TX (1 + 8)
+static uint8_t s_tx[MAX_TX][6]; /* [0] = точка доступа платы, дальше — дополнительные передатчики */
+static size_t s_tx_n;
+static int64_t s_tx_last[MAX_TX];
+#define LINK_MIN_US 20000 /* до 50 Гц на дополнительный передатчик: не забивать эфир и очередь */
 static csi_counters_t s_cnt;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -61,13 +67,22 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info)
     portENTER_CRITICAL(&s_mux);
     src_note(info->mac, &info->rx_ctrl, info->len);
     portEXIT_CRITICAL(&s_mux);
-    if (memcmp(info->mac, s_bssid, 6) != 0) return;
+    size_t k;
+    for (k = 0; k < s_tx_n && memcmp(info->mac, s_tx[k], 6) != 0; k++) {
+    }
+    if (k == s_tx_n) return;
+    int64_t now = esp_timer_get_time();
+    if (k > 0) {
+        if (now - s_tx_last[k] < LINK_MIN_US) return;
+        s_tx_last[k] = now;
+    }
     uint16_t len = info->len > CSI_MAX_LEN ? CSI_MAX_LEN : info->len;
     const wifi_pkt_rx_ctrl_t *rx = &info->rx_ctrl;
-    bool match = s_source == 1 || (rx->sig_mode == 1 && len >= 256);
+    bool match = k == 0 && (s_source == 1 || (rx->sig_mode == 1 && len >= 256));
 
-    item_hdr_t h = {.t_us = (uint64_t)esp_timer_get_time(), .rssi = rx->rssi, .noise = rx->noise_floor,
+    item_hdr_t h = {.t_us = (uint64_t)now, .rssi = rx->rssi, .noise = rx->noise_floor,
                     .sig_mode = rx->sig_mode, .cwb = rx->cwb, .len = len};
+    memcpy(h.src, info->mac, 6);
     void *slot = NULL;
     bool ok = xRingbufferSendAcquire(s_ring, &slot, sizeof(h) + len, 0) == pdTRUE;
     if (ok) {
@@ -80,17 +95,22 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info)
         s_cnt.overflow++;
     } else if (match) {
         s_cnt.accepted++;
-    } else {
+    } else if (k == 0) {
         s_cnt.dropped++;
+    } else {
+        s_cnt.links++;
     }
     s_cnt.rssi_sum += rx->rssi;
     s_cnt.rssi_n++;
     portEXIT_CRITICAL(&s_mux);
 }
 
-esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source)
+esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const uint8_t (*links)[6], size_t n_links)
 {
     memcpy(s_bssid, bssid, 6);
+    memcpy(s_tx[0], bssid, 6);
+    s_tx_n = 1;
+    for (size_t i = 0; i < n_links && s_tx_n < MAX_TX; i++) memcpy(s_tx[s_tx_n++], links[i], 6);
     s_source = csi_source;
     s_ring = xRingbufferCreateWithCaps(RING_BYTES, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
     if (!s_ring) return ESP_ERR_NO_MEM;
@@ -106,6 +126,13 @@ esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source)
     ESP_ERROR_CHECK(esp_wifi_set_csi_config(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(csi_cb, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
+    if (s_tx_n > 1) { /* чужие кадры (ответы устройств на пинг сервера) видны только в promiscuous */
+        wifi_promiscuous_filter_t f = {.filter_mask = WIFI_PROMIS_FILTER_MASK_DATA};
+        esp_wifi_set_promiscuous_filter(&f);
+        esp_err_t err = esp_wifi_set_promiscuous(true);
+        if (err != ESP_OK) ESP_LOGE(TAG, "promiscuous: %s (extra links disabled)", esp_err_to_name(err));
+        else ESP_LOGI(TAG, "promiscuous on: %u extra links", (unsigned)(s_tx_n - 1));
+    }
     ESP_LOGI(TAG, "capture started, source=%s", csi_source ? "lltf" : "ht");
     return ESP_OK;
 }
@@ -128,5 +155,6 @@ bool csi_capture_pop(wsn_csi_frame_t *out, int8_t *data_buf, TickType_t wait)
     vRingbufferReturnItem(s_ring, item);
     *out = (wsn_csi_frame_t){.t_us = h.t_us, .rssi = h.rssi, .noise = h.noise, .sig_mode = h.sig_mode,
                              .cwb = h.cwb, .len = h.len, .data = data_buf};
+    memcpy(out->src, h.src, 6);
     return true;
 }

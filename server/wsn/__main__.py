@@ -9,6 +9,7 @@ import uvicorn
 from .app import create_app
 from .ingest import IngestService
 from .keys import KeyStore
+from .pinger import Pinger, PingerConfig
 from .live import LiveHub
 from .recorder import Recorder
 from .store import Store
@@ -30,8 +31,9 @@ def main() -> None:
         live = [d for d in hub.devices() if d.age_s < 10]
         return min(live, key=lambda d: d.age_s).device_id if live else None
 
+    pinger = Pinger(PingerConfig.load(data / "links.json"))
     app = create_app(hub, ingest, ui, udp_port=udp_port, store=store, recorder=recorder,
-                     default_device=default_device)
+                     default_device=default_device, pinger=pinger)
     uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
 
 

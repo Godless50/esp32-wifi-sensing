@@ -36,6 +36,8 @@ esp_err_t settings_load(wsn_settings_t *out)
     nvs_get_u16(h, "port", &out->port);
     nvs_get_u16(h, "ping_hz", &out->ping_hz);
     nvs_get_u8(h, "csi_src", &out->csi_source);
+    len = sizeof(out->links);
+    if (nvs_get_blob(h, "links", out->links, &len) == ESP_OK) out->n_links = (uint8_t)(len / 6);
     nvs_close(h);
     return ESP_OK;
 }
@@ -53,6 +55,11 @@ esp_err_t settings_save(const wsn_settings_t *s)
     if (!err) err = nvs_set_u16(h, "port", s->port);
     if (!err) err = nvs_set_u16(h, "ping_hz", s->ping_hz);
     if (!err) err = nvs_set_u8(h, "csi_src", s->csi_source);
+    if (!err && s->n_links) err = nvs_set_blob(h, "links", s->links, (size_t)s->n_links * 6);
+    if (!err && !s->n_links) {
+        esp_err_t e = nvs_erase_key(h, "links");
+        err = (e == ESP_ERR_NVS_NOT_FOUND) ? ESP_OK : e;
+    }
     if (!err) err = nvs_commit(h);
     nvs_close(h);
     return err;

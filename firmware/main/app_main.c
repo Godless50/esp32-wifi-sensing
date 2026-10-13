@@ -45,7 +45,7 @@ void app_main(void)
     err = wifi_mgr_start(&s_settings);
     warn_if(err, "wifi start");
     if (complete && err == ESP_OK && boot_id != 0) {
-        err = csi_capture_start(s_settings.bssid, s_settings.csi_source);
+        err = csi_capture_start(s_settings.bssid, s_settings.csi_source, s_settings.links, s_settings.n_links);
         warn_if(err, "csi capture");
         if (err == ESP_OK) warn_if(uplink_start(&s_settings, boot_id), "uplink");
     } else if (complete && boot_id == 0) {

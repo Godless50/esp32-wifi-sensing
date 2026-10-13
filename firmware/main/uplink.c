@@ -85,8 +85,8 @@ static void uplink_task(void *arg)
         if (csi_capture_pop(&batch[n], slot, pdMS_TO_TICKS(10))) {
             if (n == 0) first_us = esp_timer_get_time();
             n++;
-            if (wsn_frames_fit(batch, n) < n) { /* newest frame does not fit: flush the rest */
-                send_pkt(sock, &dst, out, wsn_encode_csi(&ctx, batch, n - 1, out, sizeof(out)));
+            if (wsn_frames_fit_src(batch, n) < n) { /* newest frame does not fit: flush the rest */
+                send_pkt(sock, &dst, out, wsn_encode_csi_src(&ctx, batch, n - 1, out, sizeof(out)));
                 memcpy(data[0], batch[n - 1].data, batch[n - 1].len);
                 batch[0] = batch[n - 1];
                 batch[0].data = data[0];
@@ -96,7 +96,7 @@ static void uplink_task(void *arg)
         }
         int64_t now = esp_timer_get_time();
         if (n > 0 && (n >= WSN_MAX_FRAMES || now - first_us >= FLUSH_US)) {
-            send_pkt(sock, &dst, out, wsn_encode_csi(&ctx, batch, n, out, sizeof(out)));
+            send_pkt(sock, &dst, out, wsn_encode_csi_src(&ctx, batch, n, out, sizeof(out)));
             n = 0;
         }
 

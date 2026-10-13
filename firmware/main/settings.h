@@ -4,7 +4,8 @@
 
 #include "esp_err.h"
 
-#define WSN_FW_VER 1
+#define WSN_FW_VER 2
+#define WSN_MAX_LINKS 8
 
 typedef struct {
     char ssid[33];
@@ -15,6 +16,8 @@ typedef struct {
     uint8_t key[32];    /* all zero = not set */
     uint16_t ping_hz;
     uint8_t csi_source; /* 0 = ht, 1 = lltf */
+    uint8_t n_links;    /* extra transmitters whose CSI is forwarded (promiscuous mode) */
+    uint8_t links[WSN_MAX_LINKS][6];
 } wsn_settings_t;
 
 /* Missing fields get defaults: port=5005, ping_hz=100, csi_source=0. */

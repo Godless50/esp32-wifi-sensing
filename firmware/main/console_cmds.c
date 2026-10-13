@@ -119,11 +119,47 @@ static int cmd_status(int argc, char **argv)
     wifi_mgr_ip(&ip);
     wifi_mgr_gateway(&gw);
     printf("STATUS wifi=%s rssi=%d ip=" IPSTR " gw=" IPSTR " bssid=%s mac=%s csi_hz=%.1f fw=%d"
-           " ping_hz=%u csi_source=%s server=%s:%u\n",
+           " ping_hz=%u csi_source=%s server=%s:%u links=%u\n",
            wifi_mgr_state_str(wifi_mgr_state()), wifi_mgr_rssi(), IP2STR(&ip), IP2STR(&gw), bssid_s, mac_s,
            s_csi_hz ? s_csi_hz() : 0.0f, WSN_FW_VER, s_active.ping_hz, s_active.csi_source ? "lltf" : "ht",
-           s_active.host[0] ? s_active.host : "-", s_active.port);
+           s_active.host[0] ? s_active.host : "-", s_active.port, s_active.n_links);
     return 0;
+}
+
+/* links set <mac>[,<mac>...] | links clear — extra transmitters whose CSI is forwarded (after reboot). */
+static uint8_t s_new_links[WSN_MAX_LINKS][6];
+static uint8_t s_new_n;
+
+static void set_links(wsn_settings_t *s, char **argv)
+{
+    memcpy(s->links, s_new_links, sizeof(s->links));
+    s->n_links = s_new_n;
+}
+
+static int cmd_links(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "clear") == 0) {
+        s_new_n = 0;
+        memset(s_new_links, 0, sizeof(s_new_links));
+        return edit(set_links, argv, "OK links 0");
+    }
+    if (argc != 3 || strcmp(argv[1], "set") != 0) {
+        puts("ERR usage: links set <mac>[,<mac>...] | links clear");
+        return 1;
+    }
+    char buf[WSN_MAX_LINKS * 18 + 1];
+    strlcpy(buf, argv[2], sizeof(buf));
+    s_new_n = 0;
+    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+        if (s_new_n == WSN_MAX_LINKS || wsn_parse_mac(tok, s_new_links[s_new_n])) {
+            printf("ERR bad mac or more than %d: %s\n", WSN_MAX_LINKS, tok);
+            return 1;
+        }
+        s_new_n++;
+    }
+    char ok[24];
+    snprintf(ok, sizeof(ok), "OK links %u", s_new_n);
+    return edit(set_links, argv, ok);
 }
 
 /* promisc on|off — runtime only: CSI from all transmitters on the channel (diagnostics). */
@@ -206,6 +242,7 @@ esp_err_t console_start(const wsn_settings_t *active, csi_hz_fn_t csi_hz)
         {.command = "csi_source", .help = "csi_source set ht|lltf", .func = cmd_csi_source},
         {.command = "status", .help = "print STATUS line", .func = cmd_status},
         {.command = "reboot", .help = "restart", .func = cmd_reboot},
+        {.command = "links", .help = "links set <mac,...> | links clear", .func = cmd_links},
         {.command = "promisc", .help = "promisc on|off (runtime)", .func = cmd_promisc},
         {.command = "csi_src", .help = "csi_src [reset]: CSI per transmitter", .func = cmd_csi_src},
         {.command = "scan", .help = "scan access points", .func = cmd_scan},

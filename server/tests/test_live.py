@@ -155,3 +155,29 @@ async def test_motion_rate_and_normalisation():
     assert gaps.min() >= 0.25 - 1e-9
     assert motion[-1]["device_id"] == MAC
     assert motion[-1]["energy"] == pytest.approx(1.0, rel=0.25)  # в покое ≈ 1
+
+
+async def test_multilink_motion_and_amp_per_transmitter():
+    from wsn.protocol import TYPE_CSI_SRC
+    hub = LiveHub(decimate_hz=1.0)
+    sub = hub.subscribe()
+    rng = np.random.default_rng(4)
+    AP, LINK = "02:00:00:00:a1:18", "98:b3:ef:02:da:28"
+
+    def f(src, sigma):
+        iq = np.clip(np.round(rng.normal(20, sigma, 256)), -127, 127).astype(np.int8)
+        return CsiFrame(0, -45, -92, 1, 0, iq.tobytes(), src)
+
+    for i in range(500):  # 5 с: точка доступа 100 Гц, дополнительный передатчик 20 Гц
+        frames = [f(AP, 1.0)] + ([f(LINK, 1.0)] if i % 5 == 0 else [])
+        hub.on_packet(Packet(TYPE_CSI_SRC, MAC, 1, i, frames, None), i * 0.01)
+    msgs = []
+    while not sub.queue.empty():
+        msgs.append(sub.queue.get_nowait())
+    motion_src = {m["src"] for m in msgs if m["type"] == "motion"}
+    assert motion_src == {AP, LINK}
+    assert {m["primary"] for m in msgs if m["type"] == "motion" and m["src"] == AP} == {True}
+    assert {m["primary"] for m in msgs if m["type"] == "motion" and m["src"] == LINK} == {False}
+    assert {m["src"] for m in msgs if m["type"] == "amp"} == {AP}  # водопад — только основной канал
+    (dev,) = hub.devices(now=5.0)
+    assert dev.links[LINK]["hz"] == pytest.approx(20, rel=0.2) and dev.links[AP]["hz"] == pytest.approx(100, rel=0.1)

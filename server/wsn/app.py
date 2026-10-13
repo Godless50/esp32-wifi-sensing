@@ -52,6 +52,7 @@ def create_app(
     store: Store | None = None,
     recorder: Recorder | None = None,
     default_device: Callable[[], str | None] | None = None,
+    pinger=None,
 ) -> FastAPI:
     ui_dir = Path(ui_dir)
     tracker = RoomTracker()
@@ -95,6 +96,8 @@ def create_app(
             log.info("UDP ingest on :%d", udp_port)
         if recorder is not None:
             tasks.append(asyncio.create_task(ticker()))
+        if pinger is not None:
+            tasks.append(asyncio.create_task(pinger.run()))
         try:
             yield
         finally:
@@ -159,6 +162,12 @@ def create_app(
         except SessionNotFound as e:
             raise HTTPException(404, "no such session") from e
         return {"deleted": sid}
+
+    @app.get("/api/links")
+    def api_links() -> dict:
+        """Extra radio links: pinged devices and per-transmitter CSI rate at each board."""
+        return {"targets": pinger.stats() if pinger is not None else [],
+                "devices": {d.device_id: d.links for d in hub.devices()}}
 
     @app.get("/api/plan")
     def api_plan() -> dict:

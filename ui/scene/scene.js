@@ -27,7 +27,7 @@ scene.add(sun);
 let planGroup = new THREE.Group(), trajGroup = new THREE.Group();
 scene.add(planGroup, trajGroup);
 let bbox = { cx: 0, cy: 0, size: 8 };
-let linkMat = null;
+const links = new Map(); // "primary" | MAC передатчика -> {mat, energy, seen}
 
 function applyTheme() {
   scene.background = new THREE.Color(css("--bg") || "#0f1216");
@@ -169,16 +169,20 @@ function buildPlan(plan) {
     planGroup.add(l);
   };
   marker(plan.board || [0, 0], 0xe0564f, "плата", 0.8);
+  // линии связи «передатчик → плата»: каждая подсвечивается движением на своём канале
+  links.clear();
+  const board = plan.board || [0, 0];
+  const addLink = (key, xy, h) => {
+    const mat = new THREE.MeshBasicMaterial({ color: 0x3fb68b, transparent: true, opacity: 0.15 });
+    const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(v3(board[0], board[1], 0.8), v3(xy[0], xy[1], h)), 8, 0.025, 8), mat);
+    planGroup.add(tube);
+    links.set(key, { mat, energy: 0, seen: 0 });
+  };
   if (plan.router) {
     marker(plan.router, 0xb36ad9, "роутер B", 1.0);
-    // линия связи плата–роутер: подсвечивается движением
-    linkMat = new THREE.MeshBasicMaterial({ color: 0x3fb68b, transparent: true, opacity: 0.25 });
-    const a = v3(0, 0, 0.8), b = v3(plan.router[0], plan.router[1], 1.0);
-    const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(a, b), 8, 0.03, 8), linkMat);
-    planGroup.add(tube);
-  } else {
-    linkMat = null;
+    addLink("primary", plan.router, 1.0);
   }
+  for (const o of plan.objects || []) if (o.mac) addLink(o.mac.toLowerCase(), o.xy, (o.z || 0) + (o.size?.[2] || 0.3));
   scene.add(planGroup);
   const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
   bbox = {
@@ -235,6 +239,9 @@ const fill = document.querySelector("#motion .fill"), val = document.querySelect
 const conn = document.getElementById("conn");
 
 function onMotion(m) {
+  const l = links.get(m.primary ? "primary" : (m.src || "").toLowerCase());
+  if (l) { l.energy = m.energy; l.seen = performance.now(); }
+  if (m.primary === false) return; // шкала — по основному каналу
   energy = m.energy;
   motionSeen = performance.now();
   const frac = Math.max(0, Math.min(1, (m.energy - 0.5) / 3.5)); // 1 ≈ покой, ≥4 — сильное движение
@@ -280,10 +287,11 @@ renderer.setAnimationLoop((t) => {
   const now = performance.now();
   if (phone.visible && now - phoneSeen > 3000) phone.visible = false;
   if (now - motionSeen > 3000 && motionSeen) { val.textContent = "нет данных"; fill.style.width = "0%"; motionSeen = 0; }
-  if (linkMat) {
-    const e = motionSeen ? Math.max(0, Math.min(1, (energy - 1) / 3)) : 0;
-    linkMat.opacity = 0.2 + 0.6 * e * (0.75 + 0.25 * Math.sin(t / 120));
-    linkMat.color.set(energy < 1.6 ? 0x3fb68b : energy < 3 ? 0xe0a43a : 0xe0564f);
+  for (const l of links.values()) {
+    const live = now - l.seen < 3000;
+    const e = live ? Math.max(0, Math.min(1, (l.energy - 1) / 3)) : 0;
+    l.mat.opacity = live ? 0.2 + 0.6 * e * (0.75 + 0.25 * Math.sin(t / 120)) : 0.08;
+    l.mat.color.set(!live ? 0x888888 : l.energy < 1.6 ? 0x3fb68b : l.energy < 3 ? 0xe0a43a : 0xe0564f);
   }
   controls.update();
   renderer.render(scene, camera);

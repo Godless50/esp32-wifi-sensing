@@ -11,7 +11,7 @@ from typing import Literal
 
 import numpy as np
 
-from .protocol import TYPE_CSI, TYPE_TELEM, Packet, Telemetry
+from .protocol import CSI_TYPES, TYPE_TELEM, Packet, Telemetry
 
 _LTF_BYTES = 128  # 64 subcarriers x (imag, real) int8
 # ESP-IDF buffer order inside one LTF: subcarriers 0..31, then -32..-1. Reorder to -32..31.
@@ -70,6 +70,7 @@ class DeviceStats:
     telemetry: Telemetry | None = None
     age_s: float = 0.0
     counters: dict[str, int] = field(default_factory=lambda: {"frames": 0, "packets": 0})
+    links: dict[str, dict] = field(default_factory=dict)  # src MAC -> {"hz", "rssi"}
 
 
 class Subscription:
@@ -122,7 +123,9 @@ class LiveHub:
         self._times: dict[str, deque] = {}
         self._last_emit: dict[str, float] = {}
         self._subs: set[Subscription] = set()
-        self._motion: dict[str, _Motion] = {}
+        self._motion: dict[tuple[str, str], _Motion] = {}
+        self._link_times: dict[str, dict[str, deque]] = {}
+        self._link_rssi: dict[str, dict[str, int]] = {}
 
     def subscribe(self) -> Subscription:
         sub = Subscription(self)
@@ -138,7 +141,10 @@ class LiveHub:
         out = []
         for dev_id, st in self._stats.items():
             recent = sum(1 for t in self._times[dev_id] if t > now - _HZ_WINDOW_S)
-            out.append(dataclasses.replace(st, csi_hz=recent / _HZ_WINDOW_S,
+            links = {src: {"hz": sum(1 for t in q if t > now - _HZ_WINDOW_S) / _HZ_WINDOW_S,
+                           "rssi": self._link_rssi[dev_id].get(src)}
+                     for src, q in self._link_times.get(dev_id, {}).items()}
+            out.append(dataclasses.replace(st, csi_hz=recent / _HZ_WINDOW_S, links=links,
                                            age_s=max(0.0, now - st.last_seen), counters=dict(st.counters)))
         return out
 
@@ -154,7 +160,7 @@ class LiveHub:
             self._broadcast({"type": "telem", "device_id": p.device_id, "t": recv_t,
                              **dataclasses.asdict(p.telemetry)})
             return
-        if p.type != TYPE_CSI or not p.frames:
+        if p.type not in CSI_TYPES or not p.frames:
             return
         times = self._times[p.device_id]
         for _ in p.frames:
@@ -163,8 +169,20 @@ class LiveHub:
             times.popleft()
         st.csi_hz = len(times) / _HZ_WINDOW_S
         st.counters["frames"] += len(p.frames)
-        self._motion_update(p, recv_t)
-        last = p.frames[-1]
+        lt = self._link_times.setdefault(p.device_id, {})
+        lr = self._link_rssi.setdefault(p.device_id, {})
+        for f in p.frames:
+            q = lt.setdefault(f.src, deque())
+            q.append(recv_t)
+            while q and q[0] <= recv_t - _HZ_WINDOW_S:
+                q.popleft()
+            lr[f.src] = f.rssi
+        primary = max(lt, key=lambda s: len(lt[s]))  # основной канал — самый частый передатчик (точка доступа)
+        self._motion_update(p, recv_t, primary)
+        mine = [f for f in p.frames if f.src == primary]
+        if not mine:
+            return
+        last = mine[-1]
         st.rssi = last.rssi
         if recv_t - self._last_emit.get(p.device_id, -1e9) < self.min_interval - 1e-9:
             return
@@ -172,15 +190,19 @@ class LiveHub:
         if amp is None:
             return
         self._last_emit[p.device_id] = recv_t
-        self._broadcast({"type": "amp", "device_id": p.device_id, "t": recv_t, "rssi": last.rssi,
+        self._broadcast({"type": "amp", "device_id": p.device_id, "src": last.src, "t": recv_t, "rssi": last.rssi,
                          "sig_mode": last.sig_mode, "amp": [round(float(x), 1) for x in amp]})
 
-    def _motion_update(self, p: Packet, recv_t: float) -> None:
-        m = self._motion.get(p.device_id)
+    def _motion_update(self, p: Packet, recv_t: float, primary: str) -> None:
+        for src in {f.src for f in p.frames}:
+            self._motion_link(p, recv_t, src, src == primary)
+
+    def _motion_link(self, p: Packet, recv_t: float, src: str, primary: bool) -> None:
+        m = self._motion.get((p.device_id, src))
         if m is None:
-            m = self._motion[p.device_id] = _Motion()
+            m = self._motion[(p.device_id, src)] = _Motion()
         for f in p.frames:
-            if len(f.data) >= 256:  # только HT-LTF: L-LTF и HT не смешиваем
+            if f.src == src and len(f.data) >= 256:  # только HT-LTF: L-LTF и HT не смешиваем
                 amp = ltf_amplitude(f.data, "ht")
                 if amp is not None:
                     m.window.append((recv_t, amp))
@@ -195,7 +217,7 @@ class LiveHub:
             m.baseline.popleft()
         med = float(np.median([r for _, r in m.baseline]))
         energy = raw / med if med > 1e-6 else 0.0
-        self._broadcast({"type": "motion", "device_id": p.device_id, "t": recv_t,
+        self._broadcast({"type": "motion", "device_id": p.device_id, "src": src, "primary": primary, "t": recv_t,
                          "energy": round(energy, 3), "raw": round(raw, 3)})
 
     def publish(self, msg: dict) -> None:
