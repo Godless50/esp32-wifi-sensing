@@ -123,3 +123,56 @@ def test_settings_blob_with_promiscuous_flag_and_beacon_rate():
         assert p.start(DEV, b).kind == "settings"
 
     asyncio.run(go())
+
+
+def test_settings_blob_with_bssid():
+    from wsn.model_push import links_blob
+    b = links_blob(["02:00:00:00:c9:04"], promisc=False, beacon_hz=50, bssid="02:00:00:00:a1:3c")
+    assert len(b) == 13 + 6 and b[-6:] == bytes.fromhex("02000000a13c")
+
+
+class OldBoard:
+    """Board firmware before the re-ack fix: takes chunks only in order, ignores repeats silently and acknowledges
+    only when its state changes. Every ack after the first chunk up to a whole window ahead is lost."""
+
+    def __init__(self, pusher, total):
+        self.p, self.total, self.received, self.lost = pusher, total, 0, False
+
+    def sendto(self, data, addr):
+        from wsn.protocol import HEADER_LEN, TYPE_MODEL_ACK, ModelAck
+        ver, total, off, n = struct.unpack_from("<IIIH", data, HEADER_LEN)
+        if off != self.received:
+            return
+        self.received += n
+        if 1024 < self.received <= 9 * 1024:
+            self.lost = True  # подтверждения потерялись в эфире: сервер знает только 1024
+            return
+        ack = ModelAck(ver, self.received, 1, 1, 0)
+        asyncio.get_running_loop().call_soon(self.p.on_packet, Packet(TYPE_MODEL_ACK, DEV, 7, 1, model_ack=ack), 0.0)
+
+
+@pytest.mark.asyncio
+async def test_push_recovers_when_the_ack_of_a_whole_window_is_lost():
+    p = ModelPusher({DEV: bytes(32)}, FakeIngest())
+    b = blob(n=20000)
+    board = OldBoard(p, len(b))
+    p.transport = board
+    st = p.start(DEV, b)
+    for _ in range(60):
+        await asyncio.sleep(0.1)
+        if board.received == len(b):
+            break
+    assert board.lost and board.received == len(b)
+    p.on_packet(Packet(TYPE_TELEM, DEV, 7, 2, [], Telemetry(1.0, 0.0, -50, 1, 1, 1, 2, 5, 2)), 0.0)
+    await asyncio.sleep(1.2)
+    assert st.state == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_silent_board_never_gets_more_than_two_windows_per_round():
+    """A board that stops answering must not be flooded: the resend window stays bounded."""
+    p = ModelPusher({DEV: bytes(32)}, FakeIngest())
+    p.transport = FakeTransport()
+    st = p.start(DEV, blob(n=100_000))
+    await asyncio.sleep(4.0)  # ~6 кругов без единого ответа
+    assert st.state == "sending" and st.sent <= 2 * 8 * 1024

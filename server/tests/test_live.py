@@ -274,3 +274,13 @@ async def test_board_prediction_is_broadcast():
     m = sub.queue.get_nowait()
     assert m["type"] == "pred" and m["source"] == "board" and m["zone"] == "зал" and m["activity"] == "машет"
     assert m["model"] == "плата v7" and m["moving_p"] == 0.9
+
+
+def test_diag_is_exposed_per_device():
+    from wsn.protocol import TYPE_DIAG, Diag
+    hub = LiveHub()
+    d = Diag(5, 120, 0x40370000, 5, 1, ((4, 6), (1, 1)), "LoadProhibited")
+    hub.on_packet(Packet(TYPE_DIAG, MAC, 9, 0, diag=d), 1.0)
+    (st,) = hub.devices(now=1.0)
+    assert st.boot_id == 9 and st.diag["last"] == ["PANIC/6", "POWERON/1"]
+    assert st.diag["panic"]["msg"] == "LoadProhibited" and st.diag["prev_uptime_s"] == 120

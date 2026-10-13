@@ -14,7 +14,7 @@ import logging
 import numpy as np
 
 from .breath import SCORE_OK, SPREAD_OK, amplitude_series, score_series
-from .protocol import CSI_TYPES, TYPE_PRED, TYPE_TELEM, Packet, Prediction, Telemetry
+from .protocol import CSI_TYPES, TYPE_DIAG, TYPE_PRED, TYPE_TELEM, Packet, Prediction, Telemetry
 
 _LTF_BYTES = 128  # 64 subcarriers x (imag, real) int8
 # ESP-IDF buffer order inside one LTF: subcarriers 0..31, then -32..-1. Reorder to -32..31.
@@ -105,6 +105,8 @@ class DeviceStats:
     age_s: float = 0.0
     counters: dict[str, int] = field(default_factory=lambda: {"frames": 0, "packets": 0})
     links: dict[str, dict] = field(default_factory=dict)  # src MAC -> {"hz", "rssi"}
+    boot_id: int | None = None
+    diag: dict | None = None  # Diag.summary(): прошлые перезапуски платы и последнее падение
 
 
 class Subscription:
@@ -190,6 +192,12 @@ class LiveHub:
             self._times[p.device_id] = deque()
         st.last_seen = recv_t
         st.counters["packets"] += 1
+        if p.type == TYPE_DIAG and p.diag is not None:
+            new_boot = st.boot_id != p.boot_id or st.diag is None
+            st.boot_id, st.diag = p.boot_id, p.diag.summary()
+            if new_boot:
+                log.warning("board %s boot %08x diag: %s", p.device_id, p.boot_id, st.diag)
+            return
         if p.type == TYPE_TELEM and p.telemetry is not None:
             st.telemetry = p.telemetry
             self._broadcast({"type": "telem", "device_id": p.device_id, "t": recv_t,

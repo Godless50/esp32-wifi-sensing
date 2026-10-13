@@ -26,6 +26,10 @@ extern "C" {
 #define WSN_MODEL_CHUNK_HDR 14 /* version u32, total u32, offset u32, len u16 */
 #define WSN_MODEL_CHUNK_MAX 1024
 #define WSN_MODEL_ACK_LEN 11   /* version u32, received u32, state u8, slot u8, error u8 */
+#define WSN_TYPE_DIAG 8        /* board -> server: why the previous boots ended */
+#define WSN_DIAG_HIST 16
+#define WSN_DIAG_MSG 48        /* incl. NUL */
+#define WSN_DIAG_BT 8          /* backtrace depth of the last panic */
 
 typedef void (*wsn_hmac_fn)(const uint8_t *key, size_t key_len, const uint8_t *msg, size_t len,
                             uint8_t out[32]);
@@ -80,6 +84,27 @@ typedef struct {
     uint8_t error;      /* last error code, 0 = none */
 } wsn_model_ack_t;
 
+/* Body: boots u32, prev_uptime_s u32, panic_pc u32, panic_exc u8, panic_core u8, n u8, n x (reason u8, stage u8),
+ * msg_len u8, msg (no NUL), then rom_rst[2] u8, early_kind u8, early_cause u8, early_pc u32, bt_n u8, bt_n x u32. */
+typedef struct {
+    uint32_t boots;          /* boots counted since the counter was created */
+    uint32_t prev_uptime_s;  /* how long the previous boot ran (0 = unknown: power-on / brownout) */
+    uint32_t panic_pc;       /* address of the last panic of the previous boot */
+    uint8_t panic_exc;       /* 0 = previous boot did not panic, else panic_exception_t + 1 */
+    uint8_t panic_core;
+    uint8_t n;               /* history length, newest first */
+    uint8_t reason[WSN_DIAG_HIST]; /* esp_reset_reason_t */
+    uint8_t stage[WSN_DIAG_HIST];  /* boot stage reached; bit 0x80 = USB host present */
+    char msg[WSN_DIAG_MSG];  /* panic reason / abort message, NUL-terminated */
+    uint8_t rom_rst[2];      /* raw ROM reset reason of this boot per core (soc_reset_reason_t: which watchdog) */
+    uint8_t early_kind;      /* previous boot entered the exception vector: 0 no, 1 interrupt (IWDT, cache error),
+                                2 CPU exception; set even when the panic handler itself died */
+    uint8_t early_cause;     /* EXCCAUSE (kind 2) or PANIC_RSN_* (kind 1) */
+    uint32_t early_pc;
+    uint8_t bt_n;            /* backtrace of the last panic (as printed by ESP-IDF: PC - 3 after the first) */
+    uint32_t bt[WSN_DIAG_BT];
+} wsn_diag_t;
+
 /* Number of leading frames that fit into one datagram (<= WSN_MAX_DATAGRAM, <= WSN_MAX_FRAMES). */
 size_t wsn_frames_fit(const wsn_csi_frame_t *frames, size_t n);
 
@@ -96,6 +121,8 @@ int wsn_encode_telem(wsn_ctx_t *ctx, const wsn_telem_t *t, uint8_t *out, size_t 
 int wsn_encode_pred(wsn_ctx_t *ctx, const wsn_pred_t *r, uint8_t *out, size_t cap);
 /* Encode the OTA progress report (WSN_TYPE_MODEL_ACK). Same return convention. */
 int wsn_encode_model_ack(wsn_ctx_t *ctx, const wsn_model_ack_t *a, uint8_t *out, size_t cap);
+/* Encode the reboot history (WSN_TYPE_DIAG). Same return convention; -5 = n > WSN_DIAG_HIST or bt_n > WSN_DIAG_BT. */
+int wsn_encode_diag(wsn_ctx_t *ctx, const wsn_diag_t *d, uint8_t *out, size_t cap);
 /* Verify and parse a server packet carrying a model chunk. It must be addressed to ctx->device_id, signed with
  * ctx->key and carry ctx->boot_id (binds it to this boot: an old capture can not be replayed after a reboot).
  * *seq receives the server sequence number (caller rejects seq <= last). Returns 0 or a negative error. */

@@ -15,6 +15,10 @@ TYPE_TELEM = 3
 TYPE_CSI_SRC = 4  # CSI-кадры с MAC передатчика (несколько линий связи)
 TYPE_MODEL_CHUNK = 6  # сервер -> плата: кусок новой модели
 TYPE_MODEL_ACK = 7    # плата -> сервер: сколько модели записано
+TYPE_DIAG = 8         # плата -> сервер: чем кончились прошлые загрузки
+DIAG_HIST = 16
+DIAG_MSG = 47
+DIAG_BT = 8
 MODEL_CHUNK_MAX = 1024
 CSI_TYPES = (TYPE_CSI, TYPE_CSI_SRC)
 HEADER_LEN = 21
@@ -27,6 +31,8 @@ _TELEM = struct.Struct("<ffbIIIIIB")
 _PRED = struct.Struct("<IHBB4B4BB")
 _CHUNK = struct.Struct("<IIIH")
 _ACK = struct.Struct("<IIBBB")
+_DIAG = struct.Struct("<IIIBBB")
+_DIAG_TAIL = struct.Struct("<BBBBI")
 assert _HEADER.size == HEADER_LEN and _FRAME.size == 14 and _TELEM.size == 30 and _PRED.size == 17
 
 
@@ -80,6 +86,57 @@ class ModelAck:
     error: int
 
 
+# esp_reset_reason_t и panic_exception_t (ESP-IDF 5.x)
+RESET_REASONS = {0: "-", 1: "POWERON", 2: "EXT", 3: "SW", 4: "PANIC", 5: "INT_WDT", 6: "TASK_WDT", 7: "WDT",
+                 8: "DEEPSLEEP", 9: "BROWNOUT", 10: "SDIO", 11: "USB", 12: "JTAG", 13: "EFUSE", 14: "PWR_GLITCH",
+                 15: "CPU_LOCKUP"}
+PANIC_KINDS = {0: "", 1: "DEBUG", 2: "IWDT", 3: "TWDT", 4: "ABORT", 5: "FAULT"}
+# soc_reset_reason_t ESP32-S3: какой именно сторож/сброс (ESP_RST_WDT объединяет несколько)
+ROM_RESETS = {1: "POWERON/BROWNOUT/SUPER_WDT_CHIP", 3: "SW_SYS", 5: "DEEPSLEEP", 7: "MWDT0_SYS", 8: "MWDT1_SYS",
+              9: "RTC_WDT_SYS", 11: "MWDT0_CPU", 12: "SW_CPU", 13: "RTC_WDT_CPU", 15: "BROWNOUT_SYS",
+              16: "RTC_WDT_RTC", 17: "MWDT1_CPU", 18: "SUPER_WDT", 19: "CLK_GLITCH", 20: "EFUSE_CRC", 21: "USB_UART",
+              22: "USB_JTAG", 23: "PWR_GLITCH"}
+EARLY_KINDS = {1: "interrupt", 2: "exception"}
+PANIC_RSN = {0: "none", 1: "debug exception", 2: "double exception", 3: "kernel exception", 4: "coprocessor",
+             5: "IWDT CPU0", 6: "IWDT CPU1", 7: "cache error"}
+EXCCAUSE = {0: "IllegalInstruction", 2: "InstructionFetchError", 3: "LoadStoreError", 6: "IntegerDivideByZero",
+            9: "LoadStoreAlignment", 20: "InstFetchProhibited", 28: "LoadProhibited", 29: "StoreProhibited"}
+
+
+@dataclass(frozen=True)
+class Diag:
+    """Reboot history of a board. history: (reset reason, boot stage) newest first; stage bit 0x80 = USB host.
+    panic_*: the last panic of the previous boot (panic_exc 0 = it did not panic). prev_uptime_s 0 = unknown."""
+    boots: int
+    prev_uptime_s: int
+    panic_pc: int
+    panic_exc: int
+    panic_core: int
+    history: tuple[tuple[int, int], ...]
+    msg: str = ""
+    rom_rst: tuple[int, int] = (0, 0)  # 0 = прошивка без этого поля
+    early_kind: int = 0
+    early_cause: int = 0
+    early_pc: int = 0
+    backtrace: tuple[int, ...] = ()
+
+    def summary(self) -> dict:
+        ec = (PANIC_RSN if self.early_kind == 1 else EXCCAUSE).get(self.early_cause, str(self.early_cause))
+        return {
+            "boots": self.boots,
+            "prev_uptime_s": self.prev_uptime_s,
+            "rom_reset": [ROM_RESETS.get(r, str(r)) for r in self.rom_rst] if any(self.rom_rst) else None,
+            "early": None if not self.early_kind else {
+                "kind": EARLY_KINDS.get(self.early_kind, str(self.early_kind)), "cause": ec,
+                "pc": f"0x{self.early_pc:08x}"},
+            "backtrace": [f"0x{a:08x}" for a in self.backtrace],
+            "last": [f"{RESET_REASONS.get(r, str(r))}/{s & 0x7F}{'u' if s & 0x80 else ''}" for r, s in self.history],
+            "panic": None if not self.panic_exc else {
+                "kind": PANIC_KINDS.get(self.panic_exc, str(self.panic_exc)),
+                "pc": f"0x{self.panic_pc:08x}", "core": self.panic_core, "msg": self.msg},
+        }
+
+
 @dataclass(frozen=True)
 class Packet:
     type: int
@@ -90,6 +147,7 @@ class Packet:
     telemetry: Telemetry | None = None
     prediction: Prediction | None = None
     model_ack: ModelAck | None = None
+    diag: Diag | None = None
 
 
 def _mac_str(raw: bytes) -> str:
@@ -132,6 +190,7 @@ def parse_packet(buf: bytes, key: bytes) -> Packet:
     telemetry: Telemetry | None = None
     prediction: Prediction | None = None
     model_ack: ModelAck | None = None
+    diag: Diag | None = None
     if ptype in CSI_TYPES:
         for _ in range(n):
             if off + _FRAME.size > len(body):
@@ -165,11 +224,40 @@ def parse_packet(buf: bytes, key: bytes) -> Packet:
             raise ProtocolError("length: model ack")
         model_ack = ModelAck(*_ACK.unpack_from(body, off))
         off += _ACK.size
+    elif ptype == TYPE_DIAG:
+        if n != 1 or off + _DIAG.size > len(body):
+            raise ProtocolError("length: diag")
+        boots, up, pc, exc, core, hn = _DIAG.unpack_from(body, off)
+        off += _DIAG.size
+        if hn > DIAG_HIST or off + 2 * hn + 1 > len(body):
+            raise ProtocolError("length: diag history")
+        hist = tuple((body[off + 2 * i], body[off + 2 * i + 1]) for i in range(hn))
+        off += 2 * hn
+        ml = body[off]
+        off += 1
+        if ml > DIAG_MSG or off + ml > len(body):
+            raise ProtocolError("length: diag msg")
+        msg = bytes(body[off : off + ml]).decode("utf-8", "replace")
+        off += ml
+        extra: tuple = ()
+        rest = len(body) - off  # старые прошивки шлют пакет короче: без хвоста или без трассы
+        if rest >= _DIAG_TAIL.size:
+            r0, r1, ek, ecause, epc = _DIAG_TAIL.unpack_from(body, off)
+            off += _DIAG_TAIL.size
+            bt: tuple[int, ...] = ()
+            if rest > _DIAG_TAIL.size:
+                bn = body[off]
+                if bn > DIAG_BT or off + 1 + 4 * bn > len(body):
+                    raise ProtocolError("length: diag backtrace")
+                bt = struct.unpack_from(f"<{bn}I", body, off + 1)
+                off += 1 + 4 * bn
+            extra = ((r0, r1), ek, ecause, epc, bt)
+        diag = Diag(boots, up, pc, exc, core, hist, msg, *extra)
     else:
         raise ProtocolError(f"unsupported type {ptype}")
     if off != len(body):
         raise ProtocolError("length: trailing bytes")
-    return Packet(ptype, _mac_str(dev), boot_id, seq, frames, telemetry, prediction, model_ack)
+    return Packet(ptype, _mac_str(dev), boot_id, seq, frames, telemetry, prediction, model_ack, diag)
 
 
 def encode_packet(
@@ -181,6 +269,7 @@ def encode_packet(
     frames: list[CsiFrame] | None = None,
     telemetry: Telemetry | None = None,
     prediction: Prediction | None = None,
+    diag: Diag | None = None,
 ) -> bytes:
     parts: list[bytes] = []
     if type in CSI_TYPES:
@@ -207,6 +296,21 @@ def encode_packet(
         r = prediction
         q = lambda x: max(0, min(255, round(x * 255)))
         parts.append(_PRED.pack(r.model_ver, r.infer_ms, r.links_live, 0, *map(q, r.act), *map(q, r.zone), q(r.move)))
+    elif type == TYPE_DIAG:
+        if diag is None:
+            raise ProtocolError("diag required")
+        n = 1
+        msg = diag.msg.encode()[:DIAG_MSG]
+        if len(diag.history) > DIAG_HIST:
+            raise ProtocolError("diag history too long")
+        parts.append(_DIAG.pack(diag.boots, diag.prev_uptime_s, diag.panic_pc, diag.panic_exc, diag.panic_core,
+                                len(diag.history)))
+        parts.append(bytes(x for rs in diag.history for x in rs))
+        parts.append(bytes([len(msg)]) + msg)
+        if len(diag.backtrace) > DIAG_BT:
+            raise ProtocolError("diag backtrace too long")
+        parts.append(_DIAG_TAIL.pack(*diag.rom_rst, diag.early_kind, diag.early_cause, diag.early_pc))
+        parts.append(struct.pack(f"<B{len(diag.backtrace)}I", len(diag.backtrace), *diag.backtrace))
     else:
         raise ProtocolError(f"unsupported type {type}")
     body = _HEADER.pack(MAGIC, VERSION, type, _mac_bytes(device_id), boot_id, seq, n) + b"".join(parts)

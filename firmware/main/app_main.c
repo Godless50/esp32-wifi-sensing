@@ -9,12 +9,15 @@
 #include "infer.h"
 #include "model_ota.h"
 #include "nvs_flash.h"
+#include "panic_trace.h"
+#include "wsn_proto.h"
 #include "ping_gen.h"
 #include "settings.h"
 #include "uplink.h"
 #include "wifi_mgr.h"
 
 #include "esp_system.h"
+#include "esp_rom_sys.h"
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
@@ -94,6 +97,42 @@ void diag_print(void)
     for (int i = 0; i < DIAG_N && s_diag[i]; i++)
         printf(" %s/%u%s", diag_reason_str(s_diag[i]), s_stage[i] & 0x7f, (s_stage[i] & 0x80) ? "u" : "");
     printf("\n");
+    uint32_t up, pc;
+    uint8_t exc, core;
+    char msg[WSN_DIAG_MSG];
+    panic_trace_prev(&up, &pc, &exc, &core, msg, sizeof(msg));
+    printf("DIAG previous boot ran %lu s", (unsigned long)up);
+    if (exc) printf(", panic kind %u core %u pc 0x%08lx: %s", exc - 1, core, (unsigned long)pc, msg);
+    uint8_t ek, ec;
+    uint32_t epc;
+    panic_trace_early(&ek, &ec, &epc);
+    if (ek) printf(", entered %s vector cause %u pc 0x%08lx", ek == 1 ? "interrupt" : "exception", ec,
+                   (unsigned long)epc);
+    printf("; rom reset %u/%u\n", (unsigned)esp_rom_get_reset_reason(0), (unsigned)esp_rom_get_reset_reason(1));
+    uint32_t bt[WSN_DIAG_BT];
+    uint8_t bn = panic_trace_bt(bt, WSN_DIAG_BT);
+    if (bn) {
+        printf("DIAG backtrace:");
+        for (int i = 0; i < bn; i++) printf(" 0x%08lx", (unsigned long)bt[i]);
+        printf("\n");
+    }
+}
+
+/* Для пакета WSN_TYPE_DIAG (uplink.c). */
+void diag_get(wsn_diag_t *d)
+{
+    memset(d, 0, sizeof(*d));
+    d->boots = s_diag_n;
+    for (int i = 0; i < DIAG_N && i < WSN_DIAG_HIST && s_diag[i]; i++) {
+        d->reason[i] = s_diag[i];
+        d->stage[i] = s_stage[i];
+        d->n = (uint8_t)(i + 1);
+    }
+    panic_trace_prev(&d->prev_uptime_s, &d->panic_pc, &d->panic_exc, &d->panic_core, d->msg, sizeof(d->msg));
+    panic_trace_early(&d->early_kind, &d->early_cause, &d->early_pc);
+    d->bt_n = panic_trace_bt(d->bt, WSN_DIAG_BT);
+    d->rom_rst[0] = (uint8_t)esp_rom_get_reset_reason(0);
+    d->rom_rst[1] = (uint8_t)esp_rom_get_reset_reason(1);
 }
 static wsn_settings_t s_settings;
 
@@ -178,6 +217,7 @@ static void warn_if(esp_err_t err, const char *what)
 
 void app_main(void)
 {
+    panic_trace_boot(wsn_fw_id());
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

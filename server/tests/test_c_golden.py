@@ -75,3 +75,20 @@ def test_py_model_chunk_fixture_is_current():
     from wsn.protocol import encode_model_chunk
     fx = (Path(__file__).parent / "golden" / "py_model_chunk.hex").read_text().split()[0]
     assert encode_model_chunk(MAC, 0xDEADBEEF, 5, KEY, 1791871129, 3000, 1024, bytes(range(100))).hex() == fx
+
+
+def test_c_diag_packet():
+    from wsn.protocol import TYPE_DIAG, Diag
+    buf = _lines()[5]
+    p = parse_packet(buf, KEY)
+    assert (p.type, p.seq) == (TYPE_DIAG, 12)
+    d = p.diag
+    assert d == Diag(42, 196, 0x4037A1B2, 5, 0, ((4, 6), (3, 0x86), (1, 1)), "Cache error", (0x10, 0x0D), 1, 7,
+                     0x40380A0C, (0x4200C54C, 0x4200F6E3))
+    assert buf == encode_packet(TYPE_DIAG, MAC, 0xDEADBEEF, 12, KEY, diag=d)
+    s = d.summary()
+    assert s["last"] == ["PANIC/6", "SW/6u", "POWERON/1"]
+    assert s["panic"] == {"kind": "FAULT", "pc": "0x4037a1b2", "core": 0, "msg": "Cache error"}
+    assert s["rom_reset"] == ["RTC_WDT_RTC", "RTC_WDT_CPU"]
+    assert s["early"] == {"kind": "interrupt", "cause": "cache error", "pc": "0x40380a0c"}
+    assert s["backtrace"] == ["0x4200c54c", "0x4200f6e3"]

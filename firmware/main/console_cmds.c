@@ -125,6 +125,16 @@ static int cmd_dl(int argc, char **argv)
     return 0;
 }
 
+/* Проверка записи причины падения (panic_trace.c): crash abort | crash fault. */
+static int cmd_crash(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "abort") == 0) abort();
+    static volatile uintptr_t bad = 0x10; /* адрес вне памяти: StoreProhibited */
+    if (argc == 2 && strcmp(argv[1], "fault") == 0) *(volatile uint32_t *)bad = 1;
+    puts("ERR usage: crash abort|fault");
+    return 1;
+}
+
 static int cmd_diag(int argc, char **argv)
 {
     diag_print();
@@ -267,6 +277,7 @@ esp_err_t console_start(const wsn_settings_t *active, csi_hz_fn_t csi_hz)
         {.command = "csi_source", .help = "csi_source set ht|lltf", .func = cmd_csi_source},
         {.command = "status", .help = "print STATUS line", .func = cmd_status},
         {.command = "diag", .help = "reasons of the last restarts (power, panic, watchdog)", .func = cmd_diag},
+        {.command = "crash", .help = "crash abort|fault (test of the crash record)", .func = cmd_crash},
         {.command = "dl", .help = "reboot into download mode (for flashing)", .func = cmd_dl},
         {.command = "reboot", .help = "restart", .func = cmd_reboot},
         {.command = "links", .help = "links set <mac,...> | links clear", .func = cmd_links},

@@ -61,5 +61,19 @@ int main(void)
     n = wsn_encode_model_ack(&c, &ack, out, sizeof(out));
     if (n < 0) return 1;
     hex(out, n);
+
+    /* seq 12: reboot history */
+    wsn_diag_t d = {.boots = 42, .prev_uptime_s = 196, .panic_pc = 0x4037a1b2u, .panic_exc = 5, .panic_core = 0,
+                    .n = 3, .reason = {4, 3, 1}, .stage = {6, 0x86, 1}, .msg = "Cache error",
+                    .rom_rst = {0x10, 0x0d}, .early_kind = 1, .early_cause = 7, .early_pc = 0x40380a0cu,
+                    .bt_n = 2, .bt = {0x4200c54cu, 0x4200f6e3u}};
+    n = wsn_encode_diag(&c, &d, out, sizeof(out));
+    if (n < 0) return 1;
+    hex(out, n);
+    d.n = WSN_DIAG_HIST + 1;
+    if (wsn_encode_diag(&c, &d, out, sizeof(out)) != -5) return 1;
+    d.n = 3;
+    d.bt_n = WSN_DIAG_BT + 1;
+    if (wsn_encode_diag(&c, &d, out, sizeof(out)) != -5) return 1;
     return 0;
 }

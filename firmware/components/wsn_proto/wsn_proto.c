@@ -154,6 +154,37 @@ int wsn_encode_model_ack(wsn_ctx_t *ctx, const wsn_model_ack_t *a, uint8_t *out,
     return finish(ctx, out, p);
 }
 
+int wsn_encode_diag(wsn_ctx_t *ctx, const wsn_diag_t *d, uint8_t *out, size_t cap)
+{
+    if (!ctx || !ctx->hmac || !d || !out) return -1;
+    if (d->n > WSN_DIAG_HIST || d->bt_n > WSN_DIAG_BT) return -5;
+    size_t ml = 0;
+    while (ml < WSN_DIAG_MSG - 1 && d->msg[ml]) ml++;
+    if (cap < WSN_HEADER_LEN + 15 + 2u * d->n + 1 + ml + 9 + 4u * d->bt_n + WSN_HMAC_LEN) return -4;
+    uint8_t *p = put_header(ctx, out, WSN_TYPE_DIAG, 1);
+    p = put_u32(p, d->boots);
+    p = put_u32(p, d->prev_uptime_s);
+    p = put_u32(p, d->panic_pc);
+    p = put_u8(p, d->panic_exc);
+    p = put_u8(p, d->panic_core);
+    p = put_u8(p, d->n);
+    for (int i = 0; i < d->n; i++) {
+        p = put_u8(p, d->reason[i]);
+        p = put_u8(p, d->stage[i]);
+    }
+    p = put_u8(p, (uint8_t)ml);
+    memcpy(p, d->msg, ml);
+    p += ml;
+    p = put_u8(p, d->rom_rst[0]);
+    p = put_u8(p, d->rom_rst[1]);
+    p = put_u8(p, d->early_kind);
+    p = put_u8(p, d->early_cause);
+    p = put_u32(p, d->early_pc);
+    p = put_u8(p, d->bt_n);
+    for (int i = 0; i < d->bt_n; i++) p = put_u32(p, d->bt[i]);
+    return finish(ctx, out, p);
+}
+
 static uint32_t get_u32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 
 int wsn_parse_model_chunk(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_model_chunk_t *out)

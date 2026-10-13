@@ -13,6 +13,7 @@
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "mbedtls/md.h"
+#include "panic_trace.h"
 #include "ping_gen.h"
 #include "wifi_mgr.h"
 #include "wsn_proto.h"
@@ -24,6 +25,9 @@ static const char *TAG = "uplink";
 #define STALL_SECONDS 10
 
 #define RESOLVE_RETRY_US 5000000
+#define DIAG_EVERY_US 60000000 /* история перезапусков: сервер мог перезапуститься и её не видеть */
+
+void diag_get(wsn_diag_t *d); /* app_main.c */
 
 static wsn_settings_t s_cfg;
 static uint32_t s_boot_id;
@@ -70,6 +74,7 @@ static void uplink_task(void *arg)
     int64_t last_telem = esp_timer_get_time();
     int stall_s = 0;
     int64_t next_resolve = 0;
+    int64_t next_diag = 0;
     esp_task_wdt_add(NULL);
     ESP_LOGI(TAG, "boot_id %lu -> %s:%u", (unsigned long)ctx.boot_id, s_cfg.host, s_cfg.port);
 
@@ -137,6 +142,13 @@ static void uplink_task(void *arg)
                 .wifi_state = (uint8_t)wifi_mgr_state(),
             };
             send_pkt(sock, &dst, out, wsn_encode_telem(&ctx, &t, out, sizeof(out)));
+            panic_trace_tick(t.uptime_s);
+            if (sock >= 0 && now >= next_diag) {
+                static wsn_diag_t d;
+                diag_get(&d);
+                send_pkt(sock, &dst, out, wsn_encode_diag(&ctx, &d, out, sizeof(out)));
+                next_diag = now + DIAG_EVERY_US;
+            }
             if (c.overflow != prev.overflow)
                 ESP_LOGW(TAG, "ring overflow: %lu frames lost", (unsigned long)(c.overflow - prev.overflow));
             prev = c;
@@ -155,6 +167,7 @@ static void uplink_task(void *arg)
             if (wifi_mgr_state() != WIFI_ST_CONNECTED && sock >= 0) { /* re-resolve after reconnect */
                 close(sock);
                 sock = -1;
+                next_diag = 0;
             }
         }
     }

@@ -31,7 +31,7 @@ FW_FLAG = 0x80000000
 CFG_MASK = 0xC0000000
 
 
-def links_blob(macs: list[str], promisc: bool | None = None, beacon_hz: int = 50) -> bytes:
+def links_blob(macs: list[str], promisc: bool | None = None, beacon_hz: int = 50, bssid: str | None = None) -> bytes:
     """Settings blob for the board: extra transmitters (at most 14) and, optionally, whether to sniff the air for
     them (promiscuous mode crashes the Wi-Fi library) and the rate of its own ESP-NOW broadcasts."""
     if len(macs) > 14:
@@ -42,8 +42,13 @@ def links_blob(macs: list[str], promisc: bool | None = None, beacon_hz: int = 50
         if len(b) != 6:
             raise ValueError(f"bad MAC {m}")
         out += b
-    if promisc is not None:
+    if promisc is not None or bssid is not None:
         out += bytes([1 if promisc else 0, max(0, min(100, int(beacon_hz)))])
+    if bssid is not None:  # к какому узлу mesh подключаться (пароль сети остаётся на плате)
+        b = bytes.fromhex(bssid.replace(":", ""))
+        if len(b) != 6:
+            raise ValueError(f"bad BSSID {bssid}")
+        out += b
     return bytes(out)
 APP_DESC_MAGIC = b"\x32\x54\xcd\xab"  # esp_app_desc_t, сразу после заголовков образа (смещение 0x20)
 
@@ -97,7 +102,7 @@ class ModelPusher:
     def start(self, device_id: str, blob: bytes) -> PushState:
         fw = firmware_id(blob)
         cfg = blob[:4] == b"WSNC"
-        if cfg and (len(blob) < 5 or len(blob) not in (5 + 6 * blob[4], 7 + 6 * blob[4])):
+        if cfg and (len(blob) < 5 or len(blob) not in (5 + 6 * blob[4], 7 + 6 * blob[4], 13 + 6 * blob[4])):
             raise ValueError("bad settings blob")
         if fw is None and not cfg and (blob[:4] != b"WSNM" or len(blob) < 128):
             raise ValueError("neither a model blob, a firmware image nor a settings blob")
@@ -122,6 +127,7 @@ class ModelPusher:
         dev = st.device_id
         ev = self._ack_event.setdefault(dev, asyncio.Event())
         end = time.monotonic() + (FW_TIMEOUT_S if st.kind == "firmware" else TIMEOUT_S)
+        last_start = -1
         try:
             while time.monotonic() < end:
                 if st.kind == "model" and self.model_ver.get(dev) == st.version:
@@ -152,7 +158,15 @@ class ModelPusher:
                     await asyncio.sleep(1.0)
                     continue
                 st.state = "sending"
-                for off in range(start, min(st.total, start + WINDOW * MODEL_CHUNK_MAX), MODEL_CHUNK_MAX):
+                hi = start + WINDOW * MODEL_CHUNK_MAX
+                if start == last_start:
+                    # Нет продвижения: подтверждение платы могло потеряться, а плата уже стоит дальше (до st.sent).
+                    # Старые прошивки на повтор записанного куска не отвечают — шлём подряд до st.sent включительно,
+                    # тогда кусок, которого плата ждёт, точно в окне.
+                    # Не больше двух окон: иначе окно растёт на кусок за круг и забивает эфир (так было 13.10).
+                    hi = min(max(hi, st.sent + MODEL_CHUNK_MAX), start + 2 * WINDOW * MODEL_CHUNK_MAX)
+                last_start = start
+                for off in range(start, min(st.total, hi), MODEL_CHUNK_MAX):
                     self._seq += 1
                     data = blob[off:off + MODEL_CHUNK_MAX]
                     self.transport.sendto(encode_model_chunk(dev, boot, self._seq, key, st.version, st.total, off, data), addr)

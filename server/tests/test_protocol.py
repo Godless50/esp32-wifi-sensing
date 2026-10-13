@@ -113,3 +113,23 @@ def test_peek_device_id():
 def test_peek_device_id_short_buffer():
     with pytest.raises(ProtocolError):
         peek_device_id(b"WSN1")
+
+
+def test_diag_roundtrip_and_bounds():
+    from wsn.protocol import DIAG_HIST, TYPE_DIAG, Diag
+    d = Diag(7, 0, 0, 0, 0, ((1, 0x81),), "")
+    p = parse_packet(encode_packet(TYPE_DIAG, MAC, 3, 1, KEY, diag=d), KEY)
+    assert p.diag == d and p.diag.summary()["panic"] is None and p.diag.summary()["last"] == ["POWERON/1u"]
+    with pytest.raises(ProtocolError):
+        encode_packet(TYPE_DIAG, MAC, 3, 1, KEY, diag=Diag(1, 0, 0, 0, 0, ((1, 1),) * (DIAG_HIST + 1)))
+    body = bytearray(encode_packet(TYPE_DIAG, MAC, 3, 1, KEY, diag=d)[:-HMAC_LEN])
+    body[HEADER_LEN + 14] = DIAG_HIST + 1  # длина истории больше допустимой
+    with pytest.raises(ProtocolError):
+        parse_packet(_resign(bytes(body)), KEY)
+    with pytest.raises(ProtocolError):
+        parse_packet(_resign(bytes(body[:-1])), KEY)
+    # первая версия пакета (без хвоста с причинами сброса ROM) тоже читается
+    old = bytearray(encode_packet(TYPE_DIAG, MAC, 3, 1, KEY, diag=d)[:-HMAC_LEN - 9])
+    assert parse_packet(_resign(bytes(old)), KEY).diag == d
+    v2 = bytearray(encode_packet(TYPE_DIAG, MAC, 3, 1, KEY, diag=d)[:-HMAC_LEN - 1])  # хвост без трассы
+    assert parse_packet(_resign(bytes(v2)), KEY).diag == d

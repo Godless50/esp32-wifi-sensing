@@ -18,6 +18,9 @@ b=open(sys.argv[1],'rb').read()
 assert b[0]==0xE9 and b[0x20:0x24]==bytes.fromhex('3254cdab'), 'not an ESP app image'
 s=b[0x20+144:0x20+147]; print('%08x' % (0x80000000|(s[0]<<16)|(s[1]<<8)|s[2]))" "$BIN")
 cp "$BIN" "$R/data/ml/fw_$ID.bin"
+# ELF с отладочной информацией — чтобы потом расшифровать адреса падений из DIAG (addr2line)
+ELF="${BIN%.bin}.elf"
+[ -f "$R/data/ml/fw_$ID.elf.xz" ] || xz -T0 -c "$ELF" > "$R/data/ml/fw_$ID.elf.xz"
 curl -s -m10 -X POST http://127.0.0.1:8080/api/model/push -H 'content-type: application/json' \
   -d "{\"device_id\":\"$DEV\",\"file\":\"fw_$ID.bin\"}"
 echo

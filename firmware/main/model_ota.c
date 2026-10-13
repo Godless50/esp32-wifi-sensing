@@ -119,7 +119,12 @@ static void ota_task(void *arg)
             ESP_LOGI(TAG, "receiving %s v%lu, %lu bytes", cfg ? "settings" : app ? "firmware" : "model",
                      (unsigned long)ver, (unsigned long)total);
         }
-        if (it.offset != received || it.total != total) continue;  /* только по порядку; пропуск сервер дошлёт */
+        if (it.offset != received || it.total != total) {  /* только по порядку; пропуск сервер дошлёт */
+            /* Повтор уже записанного куска: сервер не получил наше подтверждение (пакеты теряются, когда
+             * буферы передачи Wi-Fi заняты). Без повторного ответа загрузка вставала навсегда. */
+            if (it.offset < received && it.total == total) set_state(ver, received, WSN_OTA_RECEIVING, 0);
+            continue;
+        }
         uint32_t end = it.offset + it.len;
         if (cfg) {
             if (end > total) continue;  /* total <= CFG_MAX проверено при начале загрузки */
@@ -127,9 +132,9 @@ static void ota_task(void *arg)
             received = end;
             if (received < total) { set_state(ver, received, WSN_OTA_RECEIVING, 0); continue; }
             uint8_t n = cfg_buf[4];
-            /* "WSNC" | n | n x MAC [| promisc 0/1 | beacon_hz] */
+            /* "WSNC" | n | n x MAC [| promisc 0/1 | beacon_hz [| BSSID узла mesh, к которому подключаться]] */
             if (memcmp(cfg_buf, "WSNC", 4) != 0 || n > WSN_MAX_LINKS ||
-                (total != 5u + 6u * n && total != 7u + 6u * n)) {
+                (total != 5u + 6u * n && total != 7u + 6u * n && total != 13u + 6u * n)) {
                 set_state(ver, received, WSN_OTA_ERROR, 12);
                 ver = 0;
                 continue;
@@ -139,9 +144,13 @@ static void ota_task(void *arg)
             st.n_links = n;
             memset(st.links, 0, sizeof(st.links));
             memcpy(st.links, cfg_buf + 5, 6u * n);
-            if (total == 7u + 6u * n) {
+            if (total >= 7u + 6u * n) {
                 st.promisc = cfg_buf[5 + 6 * n] ? 1 : 0;
                 st.beacon_hz = cfg_buf[6 + 6 * n];
+            }
+            if (total == 13u + 6u * n) {
+                static const uint8_t zero[6] = {0};
+                if (memcmp(cfg_buf + 7 + 6 * n, zero, 6) != 0) memcpy(st.bssid, cfg_buf + 7 + 6 * n, 6);
             }
             csi_capture_pause();  /* запись в NVS */
             esp_err_t err = settings_save(&st);
