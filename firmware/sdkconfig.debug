@@ -1,0 +1,4 @@
+# Отладочный профиль поверх sdkconfig.defaults: полная проверка кучи (поиск порчи памяти).
+# Замеры скорости с этим профилем не сравнивать с рабочей прошивкой. Сборка: tools/fw.sh build-debug
+CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+# CONFIG_HEAP_POISONING_LIGHT is not set

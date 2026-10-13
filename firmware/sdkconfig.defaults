@@ -17,8 +17,10 @@ CONFIG_SPIRAM_SPEED_80M=y
 # приём Wi-Fi/CSI из IRAM: было падение «Cache disabled but cached memory region accessed» в wDev_SnifferRxData
 CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
 
-# отладка порчи кучи (13.10): метки вокруг блоков, проверка в guard.c
-CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+# куча: лёгкие метки на границах блоков — guard_heap_check() (guard.c) ловит переполнение, почти без цены.
+# Полная проверка (COMPREHENSIVE: заполнение при выделении/освобождении) искала порчу 13.10 и искажает замеры
+# скорости; она в отладочном профиле sdkconfig.debug: tools/fw.sh build-debug
+CONFIG_HEAP_POISONING_LIGHT=y
 # задача системных событий: обработчик подключения Wi-Fi (on_link) брал до 2020 из 2304 байт стека (13.10)
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144
 # Wi-Fi и lwIP на одном ядре; приёмный буфер Wi-Fi копируется и сразу возвращается драйверу (13.10: падения при

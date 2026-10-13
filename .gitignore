@@ -21,3 +21,8 @@ firmware/components/wsn_proto/test/model_chunk_test
 firmware/build_lite/
 firmware/sdkconfig_lite.out
 firmware/sdkconfig_lite.out.old
+firmware/sdkconfig_main.out
+firmware/sdkconfig_main.out.old
+firmware/sdkconfig_debug.out
+firmware/sdkconfig_debug.out.old
+firmware/build_debug/

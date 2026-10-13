@@ -18,6 +18,12 @@ Online learning, every --adapt-min minutes when the buffer has enough fresh wind
     on the live buffer stay close to the reference model (--reference, the offline model; L1 of the histograms
     <= --max-drift) and no class takes over.
     Accepted -> the old model is kept as live_model.prev, the new one goes live; rejected -> nothing changes.
+  Calibration (spec v2): the guard also refuses an update that makes the probabilities less honest — ECE on the
+  held-out labelled sessions may grow by at most --ece-tol per head. The posted probabilities go through a
+  per-head temperature fitted on those sessions (meta.json "temperature"); it is refitted for every accepted model.
+  Home Assistant (optional, data/labels/ha.jsonl from tools/ha_labels.py): live windows recorded while nobody
+  was home for 10 min are a teacher independent of the radio. On them "somebody moves" is a false alarm; the guard
+  refuses an update that raises that rate by more than --tol (needs >= --min-ha such windows, else not checked).
   Every attempt is appended to data/ml/live_model/history.jsonl.
 
 Extras (--extras, ml/train_multi.py ensemble): number of moving people (total and per zone), posture, arms / legs
@@ -55,6 +61,8 @@ import numpy as np
 import torch
 
 from build_rich import ltf_complex
+from calib import apply_temperature, fit_temperature, report as cal_report
+from ha_weak import HaLabels
 from build_seq import NC, NT, link_seq
 from nn_common import bal, squash
 from train_final import labels
@@ -220,7 +228,16 @@ class Learner:
         self.train_anchor = ~np.isin(sess, VAL_SESSIONS)
         self.ref = load_model(Path(a.reference))[1] if a.reference and Path(a.reference, "meta.json").exists() else None
         self.last_push = 0.0
-        log.info("model v%s (%d nets), anchor %d windows", self.meta["version"], len(self.nets), len(self.anchor_X))
+        self.temp = self.meta.get("temperature") or self.fit_temps(self.nets)
+        log.info("model v%s (%d nets), anchor %d windows, temperature %s", self.meta["version"], len(self.nets),
+                 len(self.anchor_X), self.temp)
+
+    def fit_temps(self, nets) -> dict:
+        """Per-head temperature on the held-out labelled sessions (in-sample for these sessions: logged as such)."""
+        X, (ya, yz, _) = self.anchor_X[self.val], (v[self.val] for v in self.anchor_y)
+        pa, pz, _ = ensemble(nets, X)
+        z = yz >= 0
+        return {"activity": round(fit_temperature(pa, ya), 3), "zone": round(fit_temperature(pz[z], yz[z]), 3)}
 
     def teacher(self) -> dict | None:
         """Tracker state right now: link-only zone (physics), moving / still, lower bound of people."""
@@ -239,6 +256,9 @@ class Learner:
         with self.lock:
             nets, meta = self.nets, self.meta
         pa, pz, pm = ensemble(nets, X[None])
+        temp = self.temp
+        pa = apply_temperature(pa, temp.get("activity", 1.0))
+        pz = apply_temperature(pz, temp.get("zone", 1.0))
         ai, zi = int(pa[0].argmax()), int(pz[0].argmax())
         body = {"device_id": dev, "zone": meta["zones"][zi], "zone_p": round(float(pz[0, zi]), 3),
                 "activity": meta["activities"][ai], "activity_p": round(float(pa[0, ai]), 3),
@@ -263,7 +283,8 @@ class Learner:
         X, (ya, yz, _) = self.anchor_X[self.val], (v[self.val] for v in self.anchor_y)
         pa, pz, _ = ensemble(nets, X)
         z = yz >= 0
-        return {"activity": bal(ya, pa.argmax(1)), "zone": bal(yz[z], pz.argmax(1)[z])}
+        return {"activity": bal(ya, pa.argmax(1)), "zone": bal(yz[z], pz.argmax(1)[z]),
+                "activity_cal": cal_report(pa, ya), "zone_cal": cal_report(pz[z], yz[z])}
 
     def adapt(self) -> None:
         """One online update; runs in a background thread so live predictions keep flowing."""
@@ -304,14 +325,27 @@ class Learner:
                 h_ref = np.bincount(pz_old.argmax(1), minlength=k) / len(L)
             drift = float(np.abs(h_new - h_ref).sum())
             share, ref_share = float(h_new.max()), float(h_ref.max())
+            cal_ok = all(new_s[h]["ece"] <= old_s[h]["ece"] + a.ece_tol for h in ("activity_cal", "zone_cal"))
+            # время окон: снимок рядом со снимком L (окна идут 1/с; сдвиг на пару окон — секунды при 10-мин. метке)
+            t_wall = list(self.buf_t)[-len(L):]
+            ha = HaLabels.load(Path(a.ha_labels), since=min(t_wall) - 3600) if len(t_wall) == len(L) else HaLabels([])
+            empty = np.array(ha.mask(t_wall), dtype=bool) if len(t_wall) == len(L) else np.zeros(len(L), bool)
+            ha_rec = {"nobody_home_windows": int(empty.sum())}
+            ha_ok = True
+            if empty.sum() >= a.min_ha:
+                fa_old = float((ensemble(nets, L[empty])[2] > 0.5).mean())
+                fa_new = float((ensemble(cand, L[empty])[2] > 0.5).mean())
+                ha_ok = fa_new <= fa_old + a.tol
+                ha_rec.update({"false_moving_old": round(fa_old, 4), "false_moving_new": round(fa_new, 4)})
             ok = (new_s["zone"] >= old_s["zone"] - a.tol and new_s["activity"] >= old_s["activity"] - a.tol
                   and live_new >= live_old - a.tol and drift <= a.max_drift
-                  and share <= max(ref_share + 0.15, 0.6))
+                  and share <= max(ref_share + 0.15, 0.6) and cal_ok and ha_ok)
             rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "from": meta["version"], "live_windows": int(len(L)),
                    "teacher_activity": int((ya_l[keep] >= 0).sum()), "teacher_zone": int((yz_l[keep] >= 0).sum()),
                    "teacher_moving": int((ym_l[keep] >= 0).sum()), "old": old_s, "new": new_s,
                    "live_teacher_zone": {"old": round(float(live_old), 3), "new": round(float(live_new), 3)},
-                   "drift_from_reference": round(drift, 3), "top_class_share": round(share, 3), "accepted": bool(ok),
+                   "drift_from_reference": round(drift, 3), "top_class_share": round(share, 3),
+                   "calibration_ok": bool(cal_ok), "home_assistant": ha_rec, "accepted": bool(ok),
                    "seconds": round(time.time() - t0)}
             if ok:
                 ver = int(time.time())
@@ -321,12 +355,15 @@ class Learner:
                 shutil.copytree(self.model_dir, prev)
                 for i, n in enumerate(cand):
                     torch.save(n.state_dict(), self.model_dir / f"net{i}.pt")
-                meta = {**meta, "version": ver, "online_from": rec["from"], "online_live_windows": rec["live_windows"]}
+                temp = self.fit_temps(cand)
+                rec["temperature"] = temp
+                meta = {**meta, "version": ver, "online_from": rec["from"], "online_live_windows": rec["live_windows"],
+                        "temperature": temp}
                 (self.model_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
                 np.savez_compressed(self.model_dir.parent / f"live_buffer_{ver}.npz", X=L.astype(np.float16),
                                     t=np.array(self.buf_t), yz=yz_l, ym=ym_l)
                 with self.lock:
-                    self.nets, self.meta = cand, meta
+                    self.nets, self.meta, self.temp = cand, meta, temp
                 rec["to"] = ver
                 if (a.push_board and meta.get("arch") == "s2"  # то же дообучение — на плату, по воздуху;
                         and time.time() - self.last_push >= a.push_min * 60):  # каждая отправка = перезапуск платы
@@ -441,6 +478,9 @@ def main() -> None:
     ap.add_argument("--adapt-epochs", type=int, default=8)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--tol", type=float, default=0.01)
+    ap.add_argument("--ece-tol", type=float, default=0.02, help="max ECE growth per head on the held-out sessions")
+    ap.add_argument("--ha-labels", default="../data/labels/ha.jsonl", help="tools/ha_labels.py journal (optional)")
+    ap.add_argument("--min-ha", type=int, default=120, help="nobody-home live windows needed to check false alarms")
     ap.add_argument("--extras", default="../data/ml/live_model_v4", help="train_multi.py ensemble (people, pose)")
     ap.add_argument("--devices", default="7c:4f:ad:bc:9b:54", help="boards the models were trained for")
     ap.add_argument("--geo-conf", type=float, default=0.8, help="link-only zone certainty for a teacher label")

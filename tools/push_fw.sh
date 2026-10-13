@@ -6,10 +6,11 @@
 # в Wi-Fi; иначе через 2 минуты загрузчик возвращает прежнюю прошивку. Ход: GET /api/model/push.
 set -euo pipefail
 R=/home/ops/esp32-wifi-sensing
-case "${1:?main|lite}" in
+case "${1:?main|lite|debug}" in
   main) BIN=$R/firmware/build/wsn_fw.bin ;;
   lite) BIN=$R/firmware/build_lite/wsn_fw.bin ;;
-  *) echo "variant: main|lite" >&2; exit 1 ;;
+  debug) BIN=$R/firmware/build_debug/wsn_fw.bin ;;  # отладочный профиль (tools/fw.sh build-debug)
+  *) echo "variant: main|lite|debug" >&2; exit 1 ;;
 esac
 DEV=${2:?board MAC}
 ID=$(python3 -c "
@@ -18,6 +19,10 @@ b=open(sys.argv[1],'rb').read()
 assert b[0]==0xE9 and b[0x20:0x24]==bytes.fromhex('3254cdab'), 'not an ESP app image'
 s=b[0x20+144:0x20+147]; print('%08x' % (0x80000000|(s[0]<<16)|(s[1]<<8)|s[2]))" "$BIN")
 cp "$BIN" "$R/data/ml/fw_$ID.bin"
+# какой код в этой прошивке: id образа -> git SHA (+ "-dirty", если были незакоммиченные правки) и профиль sdkconfig
+SHA=$(git -C "$R" rev-parse --short HEAD)$(git -C "$R" diff --quiet -- firmware || echo -dirty)
+printf '{"fw_id":"%s","fw_ver":%d,"git":"%s","variant":"%s","built":"%s"}\n' "$ID" "$((16#$ID))" "$SHA" "$1" \
+  "$(date -r "$BIN" '+%F %T')" > "$R/data/ml/fw_$ID.json"
 # ELF с отладочной информацией — чтобы потом расшифровать адреса падений из DIAG (addr2line)
 ELF="${BIN%.bin}.elf"
 [ -f "$R/data/ml/fw_$ID.elf.xz" ] || xz -T0 -c "$ELF" > "$R/data/ml/fw_$ID.elf.xz"

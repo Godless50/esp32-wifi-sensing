@@ -30,10 +30,13 @@ def main() -> None:
     recorder = Recorder(store)
     (data / "run").mkdir(exist_ok=True)
     mirror = DatagramMirror(data / "run" / "csi.sock")  # копия потока для живого распознавания на хосте
+    # вторая копия — для замеров (tools/link_metrics.py); пока замер не идёт, сокета нет и отправка ничего не стоит
+    measure = DatagramMirror(data / "run" / "measure.sock")
 
     def on_raw(buf: bytes, device_id: str, recv_t: float) -> None:
         recorder.on_datagram(buf, device_id, recv_t)
         mirror.send(buf)
+        measure.send(buf)
 
     def on_packet(p, recv_t: float) -> None:
         hub.on_packet(p, recv_t)
