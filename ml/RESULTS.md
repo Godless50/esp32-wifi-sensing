@@ -61,3 +61,39 @@ calibrated so synthetic walking in зал/кухня matches the real walk 04:51
 Breathing (ml/breathing.py, 0.1–0.5 Hz peak vs 0.7–2 Hz floor, best 5 subcarriers, 120 s windows):
 printer link (sleeping adult next to it) 15.5, 15.5, 15.0, 14.5 /min with score 50–78 in 05:06–05:10;
 no stable peak on other links.
+
+# Scripted session (2026-10-13 05:35–05:44, clean real labels)
+
+Session 20261013-053501-ee64: 4 points (зал at the TV, кухня at the stove, коридор at the router, санузел) ×
+stand 30 s / wave 20 s / walk 30 s, then 60 s lying on the sofa. A second person lay on the sofa the whole time,
+one adult and two children slept. Phases located from link energy, inserted as `"script": true` labels.
+Bathroom link db:2c silent since its 05:17 reboot.
+
+Synthetic-only models, 2 s windows of the script (ml/eval_script.py, 7 links, 866 windows):
+
+| task | result |
+|---|---|
+| activity still / wave / walk | 0.558 — waving -> walking 112/178 |
+| zone, synthetic MLP | 0.391 |
+| zone, nearest link | 0.499 — кухня 137/138, коридор 125/136, зал -> кухня 91/108 (both kitchen links pass the TV and the sofa), санузел -> кухня |
+
+A plan variant with the corridor router at the east end raised the synthetic corridor recall to 104/136, but the
+user confirmed the router is at the west end (entrance door opposite the bedroom door): discarded.
+
+Real-label training: ml/build_rich.py (4 s windows, stride 1 s; per link: amplitude level, bursts, 4 band powers of
+the amplitude's 1st principal component, periodicity, adjacent-subcarrier phase spread), ml/train_real.py:
+
+| test | logreg | HGB | baseline |
+|---|---|---|---|
+| E1 zone, leave-one-activity-out (4 points, 331 windows) | 0.618 | 0.626 | nearest link 0.444 |
+| E2 activity, leave-one-point-out, link-agnostic features | 0.532 | 0.553 | per-link features 0.450 / 0.503 |
+| E3 trained on the script, tested on spoken sessions: somebody moves (1106 windows) | 0.683 | 0.668 | threshold 0.667 |
+| E3 zone of the mover (зал 82, санузел 40 windows) | 0.322 | 0.397 | nearest link 0.134 |
+
+E2 per held-out point (HGB, ml/e2_breakdown.py): зал and кухня — still vs walking ~90 % right, waving -> walking;
+коридор — waving 18/25, walking mixed; санузел — everything "still": the largest link rise there (0.12) equals rest
+(0.11), no link sees the bathroom.
+Caveats: one scripted session; the three activities of a point are contiguous in time, so E1 can learn the time
+period rather than the place, and E3 shows zone does not transfer across sessions yet.
+Next: a transmitter in the bathroom and one in the зал off the board->kitchen line; repeated scripted runs with
+labels posted by the phone at every step; then leave-one-session-out.

@@ -85,8 +85,8 @@ def load_quiet(data: Path, keys: KeyStore):
     return out
 
 
-def geometry(data: Path):
-    ov = json.loads((data / "plan_overrides.json").read_text(encoding="utf-8"))
+def geometry(data: Path, plan: str = "plan_overrides.json"):
+    ov = json.loads((data / plan).read_text(encoding="utf-8"))
     plan_router = None
     tx = {}
     for o in ov["objects"]:
@@ -249,10 +249,11 @@ def main():
     ap.add_argument("--n", type=int, default=20000)
     ap.add_argument("--target", default="/data/ml/real_walk_ratio.json")
     ap.add_argument("--out", default="/data/ml/synth_v1.npz")
+    ap.add_argument("--plan", default="plan_overrides.json")
     a = ap.parse_args()
     data = Path(a.data)
     quiet = load_quiet(data, KeyStore(data / "device_keys.json"))
-    tx, zones = geometry(data)
+    tx, zones = geometry(data, a.plan)
     print("links with backgrounds:", {k[-5:]: sum(len(x[0]) for x in v) for k, v in quiet.items()})
     print("transmitters:", {k[-5:]: np.round(v, 2).tolist() for k, v in tx.items()})
     gains = calibrate(quiet, tx, zones, json.loads(Path(a.target).read_text()))
