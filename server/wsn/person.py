@@ -46,6 +46,7 @@ OPENING_MARGIN_M = 0.15
 PRED_MAX_AGE_S = 2.0
 MIN_LINKS_LIVE = 4
 LINKS_STEP_S = 0.25  # шаг фильтра без ответа модели (по активности линий)
+LINK_ONLY_GAIN = 2.4  # без модели: активность двух самых возмущённых линий 0.25 -> «движется»
 P_FLOOR = 0.05
 # Зоны: если в ответе есть counts_probs (многоголовая модель, все комнаты плана) — свидетельство «в зоне кто-то
 # двигается» по каждой комнате. Иначе (модель на 4 зоны) комнаты, которых она не знает, получают нейтральное 1/K.
@@ -80,6 +81,15 @@ COUNT_ON, COUNT_HOLD_S, EXPLAIN_S = 3.0, 2.0, 0.25
 #   остальные комнаты: общая оценка движения x доля веры трекера в этой комнате (примерно).
 ROOM_EMIT_S, ROOM_HIST_S, ROOM_HIST_STEP = 1.0, 600.0, 5.0
 ROOM_MOTION_ON = 0.35  # с этого уровня в комнате «движение»
+# Где движение — по геометрии линий: наименьший набор зон, через которые проходят все возмущённые линии; из
+# равных наборов — тот, что лучше объясняет активность и меньше противоречит спокойным линиям. Раньше комнату
+# с платой зажигала средняя активность всех линий платы, а линии плата-плата идут через чужие комнаты: шаг в зале
+# зажигал и спальню, и санузел (13.10).
+COVER_ON = 0.15        # активность линии (0..1), с которой она «возмущена»
+COVER_QUIET = 0.02     # ниже — линия спокойна и говорит «на её пути никого»
+COVER_QUIET_W = 0.6    # вес противоречия спокойных линий
+COVER_MAX_ZONES = 4
+COVER_HOLD_S = 2.0     # зона горит ещё столько после последнего выбора (без мигания)
 LOCAL_MIN_LINKS = 3
 # Комната со своей платой: средняя активность линий платы (EMA BOARD_EMA_S). Человек рядом с приёмником возмущает
 # его линии сильнее, чем линии других плат; движение в другом месте задевает все платы понемногу. Поэтому
@@ -201,6 +211,16 @@ class Grid:
         return s
 
 
+    def label_sensitivity(self, device_id: str, src: str, primary: bool) -> np.ndarray | None:
+        """Max sensitivity of the link inside each label (zone) of the plan, in the order of self.labels."""
+        key = ("L", device_id, src)
+        if key not in self._sens:
+            sv = self.sensitivity(device_id, src, primary)
+            self._sens[key] = None if sv is None else np.array(
+                [float(sv[self.label_idx == i].max()) if (self.label_idx == i).any() else 0.0
+                 for i in range(len(self.labels))])
+        return self._sens[key]
+
     def explaining_rooms(self, device_id: str, src: str, primary: bool) -> frozenset:
         """Rooms where one person disturbs this link."""
         key = (device_id, src)
@@ -273,6 +293,8 @@ class PersonTracker:
         self._link_breath: dict[tuple[str, str], tuple[float, float]] = {}  # линия -> (t, вдохов/мин)
         self._rooms_at = -1e9
         self._board_act: dict[str, tuple[float, float]] = {}  # плата -> (t, EMA средней активности её линий)
+        self._cover_at = -1e9
+        self._cover: dict[str, tuple[float, float]] = {}  # зона -> (когда выбрана последний раз, сила движения)
         self.last: dict | None = None
 
     # ---- план ----
@@ -430,11 +452,53 @@ class PersonTracker:
             out[lab] = (max(pv, v), ph or here)
         return out
 
+    def _update_cover(self, now: float) -> None:
+        """Zones with motion now: the smallest set of zones that every disturbed link passes through."""
+        if now - self._cover_at < 0.2:
+            return
+        self._cover_at = now
+        g = self.grid
+        active, quiet = [], []
+        for (dev, src), a in self._link_activity(now).items():
+            sv = g.label_sensitivity(dev, src, self._links[(dev, src)].primary)
+            if sv is None or float(sv.max()) < EXPLAIN_S:
+                continue
+            if a >= COVER_ON:
+                active.append((sv, a))
+            elif a <= COVER_QUIET:
+                quiet.append(sv)
+        if not active:
+            return
+        n = len(g.labels)
+        best = None
+        for k in range(1, min(COVER_MAX_ZONES, n) + 1):
+            for combo in combinations(range(n), k):
+                idx = list(combo)
+                if not all(float(sv[idx].max()) >= EXPLAIN_S for sv, _ in active):
+                    continue
+                score = sum(a * float(sv[idx].max()) for sv, a in active)
+                score -= COVER_QUIET_W * sum(float(sv[idx].max()) for sv in quiet)
+                if best is None or score > best[0]:
+                    best = (score, idx)
+            if best is not None:
+                break
+        if best is None:  # линии противоречат друг другу: каждая возмущённая — своя лучшая зона
+            idx = sorted({int(np.argmax(sv)) for sv, _ in active})
+        else:
+            idx = best[1]
+        for i in idx:
+            m = max((a for sv, a in active if sv[i] >= EXPLAIN_S), default=0.0)
+            self._cover[g.labels[i]] = (now, m)
+
+    def _cover_now(self, now: float) -> dict[str, float]:
+        """Zone -> strength of motion for zones chosen within COVER_HOLD_S."""
+        self._update_cover(now)
+        return {lab: m for lab, (t, m) in self._cover.items() if now - t <= COVER_HOLD_S}
+
     def _local_evidence(self, b: np.ndarray, now: float, w: float) -> np.ndarray:
         g = self.grid
-        for lab, (_, here) in self._board_local(now).items():
-            if here:
-                b = b * np.where(g.label_idx == g.labels.index(lab), 1.0 + LOCAL_W, 1.0) ** w
+        for lab in self._cover_now(now):
+            b = b * np.where(g.label_idx == g.labels.index(lab), 1.0 + LOCAL_W, 1.0) ** w
         return b
 
     def _on_pred(self, msg: dict) -> dict | None:
@@ -485,7 +549,9 @@ class PersonTracker:
         self._update_board_act(now)
         top = sorted(acts.values(), reverse=True)[:2]
         link_mv = sum(top) / len(top) if top else 0.0
-        score = 0.75 * model_mv + 0.25 * link_mv if fresh else link_mv
+        # без ответов модели — только линии: шаг по комнате даёт их активность ~0.2-0.5 (живые данные 13.10), а
+        # порог MOVE_ON рассчитан на ответ модели; LINK_ONLY_GAIN приводит одно к другому
+        score = 0.75 * model_mv + 0.25 * link_mv if fresh else min(1.0, LINK_ONLY_GAIN * link_mv)
         self._score = score
         self._update_moving(score, now)
         # активность (машет / ходит / ...): EMA вероятности класса
@@ -687,11 +753,8 @@ class PersonTracker:
         g = self.grid
         board_room = {dev: g.labels[g.label_idx[int(np.argmin(np.hypot(*(g.xy - p).T)))]]
                       for dev, p in g.boards.items()}
-        local: dict[str, float] = {}
-        for lab, (v, here) in self._board_local(now).items():
-            # «кто-то здесь» -> не ниже «слабое», сильная активность -> «движение»; иначе ниже порога «слабое»
-            local[lab] = min(1.0, 0.15 + 2.0 * (v - LOCAL_ON)) if here else min(0.14, 2.0 * v)
-        mass = np.bincount(g.label_idx, weights=self.belief, minlength=len(g.labels))
+        # движение в зоне: зона выбрана по геометрии возмущённых линий; сила — самая активная из её линий
+        local = {lab: min(1.0, ROOM_MOTION_ON + m) for lab, m in self._cover_now(now).items()}
         breath: dict[str, float] = {}
         for (dev, src), (tb, bpm) in self._link_breath.items():
             if now - tb <= BREATH_FRESH_S:
@@ -701,9 +764,7 @@ class PersonTracker:
                     breath[lab] = bpm
         rooms = []
         for i, lab in enumerate(g.labels):
-            share = max(0.0, (float(mass[i]) - EST_MASS0) / (1.0 - EST_MASS0))
-            est = float(self._score) * share if self.moving else 0.0
-            m = max(local.get(lab, 0.0), est)
+            m = local.get(lab, 0.0)
             if m >= ROOM_MOTION_ON:
                 self._room_last_motion[lab] = now
             h = self._room_hist.setdefault(lab, deque())
@@ -720,7 +781,7 @@ class PersonTracker:
             rooms.append({
                 "name": lab, "motion": round(m, 2),
                 "state": "движение" if m >= ROOM_MOTION_ON else "слабое" if m >= 0.15 else "тихо",
-                "source": "board" if lab in local else "estimate",
+                "source": "links",
                 "quiet_s": None if last is None else round(now - last, 1),
                 "breath_bpm": round(breath[lab]) if lab in breath else None,
                 "hist": hist,

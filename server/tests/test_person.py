@@ -259,29 +259,60 @@ def test_reset_forgets_a_stuck_position(tmp_path):
     assert out[-1]["status"] == "ждём движения"
 
 
-def test_rooms_light_up_where_a_board_sees_motion_close_by():
-    tr, out = tracker()
+# три комнаты в ряд, в каждой своя плата и свой узел mesh; линии: узел -> своя плата и плата -> плата
+ROW = {
+    "rooms": [{"name": "A", "polygon": [[0, 0], [3, 0], [3, 3], [0, 3]]},
+              {"name": "B", "polygon": [[3, 0], [6, 0], [6, 3], [3, 3]]},
+              {"name": "C", "polygon": [[6, 0], [9, 0], [9, 3], [6, 3]]}],
+    "zones": [],
+    "objects": [{"type": "дверь", "xy": [3.0, 1.5], "size": [0.8, 0.1, 2.0]},
+                {"type": "дверь", "xy": [6.0, 1.5], "size": [0.8, 0.1, 2.0]},
+                {"type": "узел mesh", "xy": [0.5, 2.7], "mac": "ap:00:00:00:00:0a"},
+                {"type": "узел mesh", "xy": [4.5, 2.8], "mac": "ap:00:00:00:00:0b"},
+                {"type": "узел mesh", "xy": [8.5, 2.7], "mac": "ap:00:00:00:00:0c"}],
+    "board": [0.0, 0.0],
+    "boards": [{"device_id": "da", "xy": [1.0, 1.5]}, {"device_id": "db", "xy": [4.5, 1.5]},
+               {"device_id": "dc", "xy": [8.0, 1.5]}],
+    "router": None,
+}
+ROW_LINKS = [("da", "ap:00:00:00:00:0a"), ("db", "ap:00:00:00:00:0b"), ("dc", "ap:00:00:00:00:0c"),
+             ("da", "db"), ("da", "dc"), ("db", "da"), ("db", "dc"), ("dc", "da"), ("dc", "db")]
+
+
+def run_row(active_links, seconds=6.0):
+    """Quiet floor for 15 s, then the given links disturbed. Returns the last rooms message as {room: state}."""
+    out, rooms = [], []
+    tr = PersonTracker(publish=lambda m: (out if m["type"] == "person" else rooms).append(m))
+    assert tr.set_plan(ROW)
     t = 0.0
-    macs = [f"aa:00:00:00:01:{i:02x}" for i in range(4)]  # 4 линии платы d2 (она стоит в A, у y = 2.5)
     for k in range(60):
-        for m in macs:
-            tr.on_message({"type": "motion", "device_id": "d2", "src": m, "t": t, "raw": 1.0 + 0.05 * (k % 3)})
-        tr.on_message(pred(t, pa=0.5, moving=0.05))
+        for dev, src in ROW_LINKS:
+            tr.on_message({"type": "motion", "device_id": dev, "src": src, "t": t, "raw": 1.0 + 0.05 * (k % 3)})
         t += 0.25
-    rooms = tr.rooms_out
     assert rooms and all(r["state"] == "тихо" for r in rooms[-1]["rooms"])
-    for k in range(20):  # человек у платы d2: возмущены все её линии
-        for m in macs:
-            tr.on_message({"type": "motion", "device_id": "d2", "src": m, "t": t, "raw": 6.0})
-        tr.on_message(pred(t, pa=0.5, moving=0.9))
+    for k in range(int(seconds / 0.25)):
+        for dev, src in ROW_LINKS:
+            raw = 6.0 if (dev, src) in active_links else 1.0 + 0.05 * (k % 3)
+            tr.on_message({"type": "motion", "device_id": dev, "src": src, "t": t, "raw": raw})
         t += 0.25
-    last = {r["name"]: r for r in tr.rooms_out[-1]["rooms"]}
-    assert last["A"]["state"] == "движение" and last["A"]["source"] == "board" and last["A"]["quiet_s"] == 0.0
-    assert len(last["A"]["hist"]) == 120 and last["A"]["hist"][-1] > 0.35
-    tr.on_message({"type": "breath", "device_id": "d1", "src": "aa:00:00:00:00:01", "t": t, "bpm": 15.2, "ok": True})
-    tr.on_message(pred(t + 1.0, pa=0.5, moving=0.9))
-    last = {r["name"]: r for r in tr.rooms_out[-1]["rooms"]}
-    assert last["A"]["breath_bpm"] == 15  # передатчик линии стоит в A
+    return tr, {r["name"]: r for r in rooms[-1]["rooms"]}
+
+
+def test_walking_in_the_middle_room_lights_only_that_room():
+    """13.10: шаг в зале зажигал и спальню, и санузел — их платы видели возмущение линий, идущих через зал."""
+    disturbed = {("db", "ap:00:00:00:00:0b"), ("db", "da"), ("db", "dc"), ("da", "db"), ("dc", "db"),
+                 ("da", "dc"), ("dc", "da")}  # все линии платы B и линия A-C, идущая через B
+    tr, last = run_row(disturbed)
+    assert last["B"]["state"] == "движение" and last["B"]["quiet_s"] == 0.0 and last["B"]["hist"][-1] > 0.35
+    assert last["A"]["state"] == "тихо" and last["C"]["state"] == "тихо"
+
+
+def test_two_people_in_the_outer_rooms_light_both_and_not_the_middle():
+    disturbed = {("da", "ap:00:00:00:00:0a"), ("da", "db"), ("da", "dc"), ("db", "da"), ("dc", "da"),
+                 ("dc", "ap:00:00:00:00:0c"), ("dc", "db"), ("db", "dc"), ("da", "dc")}
+    _, last = run_row(disturbed)
+    assert last["A"]["state"] == "движение" and last["C"]["state"] == "движение"
+    assert last["B"]["state"] == "тихо"  # линия узла B спокойна: в B никого
 
 
 def test_board_room_is_occupied_only_when_its_board_is_disturbed_more_than_the_others():
@@ -307,3 +338,20 @@ def test_board_room_is_occupied_only_when_its_board_is_disturbed_more_than_the_o
     assert not tr._board_local(now)["A"][1]
     # устаревшие значения не считаются
     assert tr._board_local(now + 10.0) == {}
+
+
+def test_walking_is_seen_from_moderately_disturbed_links_without_the_model():
+    tr, out = tracker()
+    t = 0.0
+    links = [("d1", "aa:00:00:00:00:01"), ("d2", "aa:00:00:00:00:02"), ("d1", "d2"), ("d2", "d1")]
+    for k in range(60):
+        for dev, src in links:
+            tr.on_message({"type": "motion", "device_id": dev, "src": src, "t": t, "raw": 1.0 + 0.05 * (k % 3)})
+        t += 0.25
+    assert not out[-1]["moving"]
+    for k in range(16):  # ходьба: отношение к полу ~2.1 (активность ~0.4), не 6
+        for dev, src in links:
+            tr.on_message({"type": "motion", "device_id": dev, "src": src, "t": t, "raw": 2.2 if dev == "d2" else 1.0})
+        t += 0.25
+    assert out[-1]["moving"]
+
