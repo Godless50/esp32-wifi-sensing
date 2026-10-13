@@ -1,5 +1,6 @@
 #include "wifi_mgr.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_event.h"
@@ -7,6 +8,53 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "nvs.h"
+
+/* Журнал Wi-Fi в NVS (переживает отключение питания): коды причин последних отключений, 255 = новая загрузка,
+ * и счётчик полученных IP. Плата, не появившаяся в сети вдали от сервера, по возвращении покажет в diag,
+ * видела ли она точку (201 = NO_AP_FOUND), не пустил ли её пароль (15/204) или подключалась и теряла связь. */
+#define WLOG_N 24
+#define WLOG_MAX_PER_BOOT 40
+static uint8_t s_wlog[WLOG_N];
+static uint32_t s_wlog_ip;
+static int s_wlog_writes;
+volatile bool wsn_flash_quiet;  /* true после старта CSI/сниффера: запись во флеш при нём роняет прошивку (cache disabled) */
+
+static void wlog_push(uint8_t code, bool got_ip)
+{
+    if (wsn_flash_quiet || s_wlog_writes++ >= WLOG_MAX_PER_BOOT) return;  /* не изнашивать флеш при долгом поиске сети */
+    nvs_handle_t h;
+    if (nvs_open("diag", NVS_READWRITE, &h) != ESP_OK) return;
+    size_t len = sizeof(s_wlog);
+    if (nvs_get_blob(h, "wr", s_wlog, &len) != ESP_OK) memset(s_wlog, 0, sizeof(s_wlog));
+    nvs_get_u32(h, "ipn", &s_wlog_ip);
+    if (got_ip) s_wlog_ip++;
+    else {
+        memmove(s_wlog + 1, s_wlog, WLOG_N - 1);
+        s_wlog[0] = code;
+    }
+    nvs_set_blob(h, "wr", s_wlog, sizeof(s_wlog));
+    nvs_set_u32(h, "ipn", s_wlog_ip);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+void wifi_mgr_diag_print(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("diag", NVS_READONLY, &h) == ESP_OK) {
+        size_t len = sizeof(s_wlog);
+        if (nvs_get_blob(h, "wr", s_wlog, &len) != ESP_OK) memset(s_wlog, 0, sizeof(s_wlog));
+        nvs_get_u32(h, "ipn", &s_wlog_ip);
+        nvs_close(h);
+    }
+    printf("WIFILOG got_ip=%lu disc(new first, B=boot):", (unsigned long)s_wlog_ip);
+    for (int i = 0; i < WLOG_N && s_wlog[i]; i++) {
+        if (s_wlog[i] == 255) printf(" B");
+        else printf(" %u", s_wlog[i]);
+    }
+    printf("\n");
+}
 
 static const char *TAG = "wifi_mgr";
 
@@ -65,6 +113,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             s_state = WIFI_ST_CONNECTING;
         }
         ESP_LOGW(TAG, "disconnected, reason %d -> %s", d->reason, wifi_mgr_state_str(s_state));
+        wlog_push(d->reason > 254 ? 254 : (uint8_t)d->reason, false);
         if (was_up && s_link_cb) s_link_cb(false);
         if (!was_up && s_locked && ++s_fails >= LOCK_FAILS) {
             wifi_config_t cfg;
@@ -87,6 +136,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         s_state = WIFI_ST_CONNECTED;
         s_backoff_s = 1;
         s_fails = 0;
+        wlog_push(0, true);
         ESP_LOGI(TAG, "got ip " IPSTR " gw " IPSTR, IP2STR(&s_ip), IP2STR(&s_gw));
         if (s_link_cb) s_link_cb(true);
     }
@@ -104,6 +154,7 @@ esp_err_t wifi_mgr_start(const wsn_settings_t *s)
     ESP_ERROR_CHECK(esp_timer_create(&targs, &s_retry_timer));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
+    wlog_push(255, false);
     s_enabled = settings_complete(s);
     if (s_enabled) {
         wifi_config_t cfg = {0};

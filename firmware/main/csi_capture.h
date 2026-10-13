@@ -34,3 +34,7 @@ esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const ui
 void csi_capture_counters(csi_counters_t *out);
 /* Pop next frame; data copied into data_buf (>= CSI_MAX_LEN), out->data points to it. */
 bool csi_capture_pop(wsn_csi_frame_t *out, int8_t *data_buf, TickType_t wait);
+/* Stop / restart CSI and the Wi-Fi sniffer around flash writes: a flash write while the sniffer copies a frame
+ * crashed the boards ("Cache disabled but cached memory region accessed" in wDev_SnifferRxData). */
+void csi_capture_pause(void);
+void csi_capture_resume(void);

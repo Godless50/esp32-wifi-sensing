@@ -18,3 +18,6 @@ node_modules/
 firmware/managed_components/
 firmware/components/wsn_feat/test/test_feat
 firmware/components/wsn_proto/test/model_chunk_test
+firmware/build_lite/
+firmware/sdkconfig_lite.out
+firmware/sdkconfig_lite.out.old

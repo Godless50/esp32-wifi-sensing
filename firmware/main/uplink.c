@@ -132,7 +132,7 @@ static void uplink_task(void *arg)
                 .heap_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 .psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                 .uptime_s = (uint32_t)(now / 1000000),
-                .fw_ver = WSN_FW_VER,
+                .fw_ver = wsn_fw_id(),
                 .model_ver = infer_model_ver(),
                 .wifi_state = (uint8_t)wifi_mgr_state(),
             };

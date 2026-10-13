@@ -19,6 +19,7 @@ typedef struct __attribute__((packed)) {
 } item_hdr_t;
 
 #define RING_BYTES (160 * 1024) /* ~4 s at 100 Hz x 400 B */
+#define RING_BYTES_INTERNAL (40 * 1024)
 
 static RingbufHandle_t s_ring;
 static uint8_t s_bssid[6];
@@ -29,6 +30,7 @@ static size_t s_tx_n;
 static int64_t s_tx_last[MAX_TX];
 #define LINK_MIN_US 20000 /* до 50 Гц на дополнительный передатчик: не забивать эфир и очередь */
 static csi_counters_t s_cnt;
+static bool s_promisc;  /* включено ли прослушивание (нужно для дополнительных линий) */
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
 /* Диагностика: кто ещё на канале даёт CSI (видно в promiscuous). Не влияет на отправку. */
@@ -113,6 +115,8 @@ esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const ui
     for (size_t i = 0; i < n_links && s_tx_n < MAX_TX; i++) memcpy(s_tx[s_tx_n++], links[i], 6);
     s_source = csi_source;
     s_ring = xRingbufferCreateWithCaps(RING_BYTES, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
+    if (!s_ring)  /* плата без PSRAM (S3 с 8 МБ флеша): кольцо поменьше во внутренней памяти, ~1 с запаса */
+        s_ring = xRingbufferCreateWithCaps(RING_BYTES_INTERNAL, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!s_ring) return ESP_ERR_NO_MEM;
     wifi_csi_config_t cfg = {
         .lltf_en = true,
@@ -127,14 +131,33 @@ esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const ui
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(csi_cb, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
     if (s_tx_n > 1) { /* чужие кадры (ответы устройств на пинг сервера) видны только в promiscuous */
-        wifi_promiscuous_filter_t f = {.filter_mask = WIFI_PROMIS_FILTER_MASK_DATA};
+        /* Только одиночные кадры данных (MPDU): ответы устройств на пинг. Склеенные кадры (A-MPDU — чужие загрузки,
+         * видео) через путь прослушивания роняли все платы разом (13.10: паника в wDev_SnifferRxData, cache error). */
+        wifi_promiscuous_filter_t f = {.filter_mask = WIFI_PROMIS_FILTER_MASK_DATA_MPDU};
         esp_wifi_set_promiscuous_filter(&f);
         esp_err_t err = esp_wifi_set_promiscuous(true);
+        s_promisc = err == ESP_OK;
         if (err != ESP_OK) ESP_LOGE(TAG, "promiscuous: %s (extra links disabled)", esp_err_to_name(err));
         else ESP_LOGI(TAG, "promiscuous on: %u extra links", (unsigned)(s_tx_n - 1));
     }
     ESP_LOGI(TAG, "capture started, source=%s", csi_source ? "lltf" : "ht");
     return ESP_OK;
+}
+
+void csi_capture_pause(void)
+{
+    if (!s_ring) return;
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_csi(false);
+    ESP_LOGW(TAG, "capture paused (flash write)");
+}
+
+void csi_capture_resume(void)
+{
+    if (!s_ring) return;
+    esp_wifi_set_csi(true);
+    if (s_promisc) esp_wifi_set_promiscuous(true);
+    ESP_LOGI(TAG, "capture resumed");
 }
 
 void csi_capture_counters(csi_counters_t *out)

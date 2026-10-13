@@ -3,7 +3,9 @@
 
 #include <string.h>
 
+#include "csi_capture.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_rom_crc.h"
 #include "esp_system.h"
@@ -17,6 +19,8 @@ static const char *TAG = "model_ota";
 #define NS "wsn_model"
 #define SECTOR 4096
 #define HDR 128
+/* Бит 31 версии: это не модель, а прошивка (образ приложения ESP). Версия прошивки = wsn_fw_id() новой сборки. */
+#define FW_FLAG 0x80000000u
 
 typedef struct {
     uint32_t version, total, offset;
@@ -62,31 +66,80 @@ static bool verify(const esp_partition_t *p, uint32_t total)
     return ok;
 }
 
+static void ota_fail(uint32_t ver, uint32_t received, uint8_t error)
+{
+    set_state(ver, received, WSN_OTA_ERROR, error);
+    csi_capture_resume();
+}
+
 static void ota_task(void *arg)
 {
     static item_t it;
     uint32_t ver = 0, total = 0, received = 0;
+    bool app = false;
+    esp_ota_handle_t app_h = 0;
+    bool app_open = false;
+    const esp_partition_t *app_part = NULL;
     const esp_partition_t *dst = slot_part(s_active ^ 1);
     for (;;) {
         if (xQueueReceive(s_q, &it, portMAX_DELAY) != pdTRUE) continue;
-        if (!dst) { set_state(it.version, 0, WSN_OTA_ERROR, 1); continue; }
         if (it.version != ver || it.offset == 0) {  /* новая загрузка */
             if (it.offset != 0) continue;            /* ждём начало */
-            if (it.total < HDR || it.total > dst->size) { set_state(it.version, 0, WSN_OTA_ERROR, 2); continue; }
+            if (app_open) {
+                esp_ota_abort(app_h);
+                app_open = false;
+            }
+            app = (it.version & FW_FLAG) != 0;
+            ver = 0;
+            if (app) {
+                app_part = esp_ota_get_next_update_partition(NULL);
+                if (!app_part || it.total > app_part->size) { set_state(it.version, 0, WSN_OTA_ERROR, 6); continue; }
+            } else {
+                if (!dst) { set_state(it.version, 0, WSN_OTA_ERROR, 1); continue; }
+                if (it.total < HDR || it.total > dst->size) { set_state(it.version, 0, WSN_OTA_ERROR, 2); continue; }
+            }
+            csi_capture_pause();  /* запись во флеш при включённом прослушивании эфира роняла плату */
+            if (app) {
+                if (esp_ota_begin(app_part, OTA_WITH_SEQUENTIAL_WRITES, &app_h) != ESP_OK) {
+                    ota_fail(it.version, 0, 7);
+                    continue;
+                }
+                app_open = true;
+            }
             ver = it.version; total = it.total; received = 0; s_erased = 0;
-            ESP_LOGI(TAG, "receiving model v%lu, %lu bytes -> %s", (unsigned long)ver, (unsigned long)total, dst->label);
+            ESP_LOGI(TAG, "receiving %s v%lu, %lu bytes -> %s", app ? "firmware" : "model", (unsigned long)ver,
+                     (unsigned long)total, app ? app_part->label : dst->label);
         }
         if (it.offset != received || it.total != total) continue;  /* только по порядку; пропуск сервер дошлёт */
         uint32_t end = it.offset + it.len;
+        if (app) {
+            if (esp_ota_write(app_h, it.data, it.len) != ESP_OK) {
+                esp_ota_abort(app_h);
+                app_open = false;
+                ota_fail(ver, received, 8);
+                ver = 0;
+                continue;
+            }
+            received = end;
+            if (received < total) { set_state(ver, received, WSN_OTA_RECEIVING, 0); continue; }
+            app_open = false;
+            if (esp_ota_end(app_h) != ESP_OK) { ota_fail(ver, received, 9); ver = 0; continue; }  /* образ проверен */
+            if (esp_ota_set_boot_partition(app_part) != ESP_OK) { ota_fail(ver, received, 10); ver = 0; continue; }
+            ESP_LOGI(TAG, "firmware %08lx verified, booting %s (rolls back unless it reaches Wi-Fi)",
+                     (unsigned long)ver, app_part->label);
+            set_state(ver, received, WSN_OTA_ACTIVATING, 0);
+            vTaskDelay(pdMS_TO_TICKS(1500));  /* успеть отправить ACK */
+            esp_restart();
+        }
         while (s_erased < end) {
-            if (esp_partition_erase_range(dst, s_erased, SECTOR) != ESP_OK) { set_state(ver, received, WSN_OTA_ERROR, 3); break; }
+            if (esp_partition_erase_range(dst, s_erased, SECTOR) != ESP_OK) { ota_fail(ver, received, 3); break; }
             s_erased += SECTOR;
         }
         if (s_erased < end) continue;
-        if (esp_partition_write(dst, it.offset, it.data, it.len) != ESP_OK) { set_state(ver, received, WSN_OTA_ERROR, 4); continue; }
+        if (esp_partition_write(dst, it.offset, it.data, it.len) != ESP_OK) { ota_fail(ver, received, 4); continue; }
         received = end;
         if (received < total) { set_state(ver, received, WSN_OTA_RECEIVING, 0); continue; }
-        if (!verify(dst, total)) { set_state(ver, received, WSN_OTA_ERROR, 5); ver = 0; continue; }
+        if (!verify(dst, total)) { ota_fail(ver, received, 5); ver = 0; continue; }
         nvs_handle_t h;
         if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
             nvs_set_u8(h, "slot", (uint8_t)(s_active ^ 1));

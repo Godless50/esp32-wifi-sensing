@@ -1,0 +1,6 @@
+# Поверх sdkconfig.defaults: ESP32-S3 с 8 МБ встроенного флеша и без PSRAM (напр. ESP32-S3FN8).
+# Сборка: tools/fw.sh build-lite / flash-lite <порт>
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+# CONFIG_ESPTOOLPY_FLASHSIZE_16MB is not set
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_8mb.csv"
+# CONFIG_SPIRAM is not set

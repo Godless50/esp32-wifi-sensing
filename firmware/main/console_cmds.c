@@ -1,3 +1,7 @@
+#include "soc/rtc_cntl_reg.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
 #include "console_cmds.h"
 
 #include <stdio.h>
@@ -108,6 +112,26 @@ static int cmd_csi_source(int argc, char **argv)
     return edit(set_src, argv, "OK csi_source");
 }
 
+void diag_print(void);  /* app_main.c */
+void wifi_mgr_diag_print(void);  /* wifi_mgr.c */
+/* Перезагрузка в режим прошивки без кнопки BOOT: на части плат USB-сброс esptool не переводит чип в загрузчик. */
+static int cmd_dl(int argc, char **argv)
+{
+    printf("rebooting into download mode\n");
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+    esp_restart();
+    return 0;
+}
+
+static int cmd_diag(int argc, char **argv)
+{
+    diag_print();
+    wifi_mgr_diag_print();
+    return 0;
+}
+
 static int cmd_status(int argc, char **argv)
 {
     uint8_t mac[6];
@@ -165,13 +189,14 @@ static int cmd_links(int argc, char **argv)
 /* promisc on|off — runtime only: CSI from all transmitters on the channel (diagnostics). */
 static int cmd_promisc(int argc, char **argv)
 {
-    if (argc != 2 || (strcmp(argv[1], "on") && strcmp(argv[1], "off"))) {
-        puts("ERR usage: promisc on|off");
+    if (argc != 2 || (strcmp(argv[1], "on") && strcmp(argv[1], "off") && strcmp(argv[1], "all"))) {
+        puts("ERR usage: promisc on|all|off  (on = single data frames only, all = also A-MPDU)");
         return 1;
     }
-    bool on = strcmp(argv[1], "on") == 0;
+    bool on = strcmp(argv[1], "off") != 0;
     if (on) {
-        wifi_promiscuous_filter_t f = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA};
+        wifi_promiscuous_filter_t f = {.filter_mask = strcmp(argv[1], "all") == 0 ? WIFI_PROMIS_FILTER_MASK_DATA
+                                                                                 : WIFI_PROMIS_FILTER_MASK_DATA_MPDU};
         esp_wifi_set_promiscuous_filter(&f);
     }
     esp_err_t err = esp_wifi_set_promiscuous(on);
@@ -241,9 +266,11 @@ esp_err_t console_start(const wsn_settings_t *active, csi_hz_fn_t csi_hz)
         {.command = "ping_hz", .help = "ping_hz set <1..200>", .func = cmd_ping_hz},
         {.command = "csi_source", .help = "csi_source set ht|lltf", .func = cmd_csi_source},
         {.command = "status", .help = "print STATUS line", .func = cmd_status},
+        {.command = "diag", .help = "reasons of the last restarts (power, panic, watchdog)", .func = cmd_diag},
+        {.command = "dl", .help = "reboot into download mode (for flashing)", .func = cmd_dl},
         {.command = "reboot", .help = "restart", .func = cmd_reboot},
         {.command = "links", .help = "links set <mac,...> | links clear", .func = cmd_links},
-        {.command = "promisc", .help = "promisc on|off (runtime)", .func = cmd_promisc},
+        {.command = "promisc", .help = "promisc on|all|off (runtime; on = MPDU only)", .func = cmd_promisc},
         {.command = "csi_src", .help = "csi_src [reset]: CSI per transmitter", .func = cmd_csi_src},
         {.command = "scan", .help = "scan access points", .func = cmd_scan},
     };

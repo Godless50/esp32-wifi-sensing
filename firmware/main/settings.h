@@ -5,6 +5,8 @@
 #include "esp_err.h"
 
 #define WSN_FW_VER 2
+/* Номер сборки для телеметрии (поле fw_ver) и обновления по воздуху: бит 31 + первые 3 байта SHA256 ELF. */
+uint32_t wsn_fw_id(void);
 #define WSN_MAX_LINKS 8
 
 typedef struct {
