@@ -30,6 +30,8 @@ extern "C" {
 #define WSN_DIAG_HIST 16
 #define WSN_DIAG_MSG 48        /* incl. NUL */
 #define WSN_DIAG_BT 8          /* backtrace depth of the last panic */
+#define WSN_TYPE_LOG 9         /* board -> server: one line of text (remote debugging of boards away from USB) */
+#define WSN_LOG_MAX 200
 
 typedef void (*wsn_hmac_fn)(const uint8_t *key, size_t key_len, const uint8_t *msg, size_t len,
                             uint8_t out[32]);
@@ -123,6 +125,8 @@ int wsn_encode_pred(wsn_ctx_t *ctx, const wsn_pred_t *r, uint8_t *out, size_t ca
 int wsn_encode_model_ack(wsn_ctx_t *ctx, const wsn_model_ack_t *a, uint8_t *out, size_t cap);
 /* Encode the reboot history (WSN_TYPE_DIAG). Same return convention; -5 = n > WSN_DIAG_HIST or bt_n > WSN_DIAG_BT. */
 int wsn_encode_diag(wsn_ctx_t *ctx, const wsn_diag_t *d, uint8_t *out, size_t cap);
+/* Encode one text line (WSN_TYPE_LOG): body = len u8 + text (no NUL), cut to WSN_LOG_MAX. Same return convention. */
+int wsn_encode_log(wsn_ctx_t *ctx, const char *text, uint8_t *out, size_t cap);
 /* Verify and parse a server packet carrying a model chunk. It must be addressed to ctx->device_id, signed with
  * ctx->key and carry ctx->boot_id (binds it to this boot: an old capture can not be replayed after a reboot).
  * *seq receives the server sequence number (caller rejects seq <= last). Returns 0 or a negative error. */

@@ -92,3 +92,11 @@ def test_c_diag_packet():
     assert s["rom_reset"] == ["RTC_WDT_RTC", "RTC_WDT_CPU"]
     assert s["early"] == {"kind": "interrupt", "cause": "cache error", "pc": "0x40380a0c"}
     assert s["backtrace"] == ["0x4200c54c", "0x4200f6e3"]
+
+
+def test_c_log_packet():
+    from wsn.protocol import TYPE_LOG
+    buf = _lines()[6]
+    p = parse_packet(buf, KEY)
+    assert (p.type, p.seq, p.log) == (TYPE_LOG, 13, "romif +0x128 3fc9a000->00000000")
+    assert buf == encode_packet(TYPE_LOG, MAC, 0xDEADBEEF, 13, KEY, log=p.log)

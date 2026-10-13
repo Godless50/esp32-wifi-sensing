@@ -14,7 +14,7 @@ import logging
 import numpy as np
 
 from .breath import SCORE_OK, SPREAD_OK, amplitude_series, score_series
-from .protocol import CSI_TYPES, TYPE_DIAG, TYPE_PRED, TYPE_TELEM, Packet, Prediction, Telemetry
+from .protocol import CSI_TYPES, TYPE_DIAG, TYPE_LOG, TYPE_PRED, TYPE_TELEM, Packet, Prediction, Telemetry
 
 _LTF_BYTES = 128  # 64 subcarriers x (imag, real) int8
 # ESP-IDF buffer order inside one LTF: subcarriers 0..31, then -32..-1. Reorder to -32..31.
@@ -22,6 +22,7 @@ _REORDER = np.r_[32:64, 0:32]
 _HZ_WINDOW_S = 2.0
 _QUEUE_MAX = 200
 log = logging.getLogger(__name__)
+LOG_KEEP = 30
 
 
 def ltf_amplitude(data: bytes, part: Literal["lltf", "ht"]) -> np.ndarray | None:
@@ -107,6 +108,7 @@ class DeviceStats:
     links: dict[str, dict] = field(default_factory=dict)  # src MAC -> {"hz", "rssi"}
     boot_id: int | None = None
     diag: dict | None = None  # Diag.summary(): прошлые перезапуски платы и последнее падение
+    log: list[str] = field(default_factory=list)  # последние строки TYPE_LOG с временем сервера
 
 
 class Subscription:
@@ -192,6 +194,10 @@ class LiveHub:
             self._times[p.device_id] = deque()
         st.last_seen = recv_t
         st.counters["packets"] += 1
+        if p.type == TYPE_LOG and p.log is not None:
+            st.log = (st.log + [f"{time.strftime('%H:%M:%S')} {p.log}"])[-LOG_KEEP:]
+            log.warning("board %s: %s", p.device_id, p.log)
+            return
         if p.type == TYPE_DIAG and p.diag is not None:
             new_boot = st.boot_id != p.boot_id or st.diag is None
             st.boot_id, st.diag = p.boot_id, p.diag.summary()

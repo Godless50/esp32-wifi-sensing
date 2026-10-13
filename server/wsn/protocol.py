@@ -19,6 +19,8 @@ TYPE_DIAG = 8         # плата -> сервер: чем кончились п
 DIAG_HIST = 16
 DIAG_MSG = 47
 DIAG_BT = 8
+TYPE_LOG = 9          # плата -> сервер: строка текста (отладка плат вдали от USB)
+LOG_MAX = 200
 MODEL_CHUNK_MAX = 1024
 CSI_TYPES = (TYPE_CSI, TYPE_CSI_SRC)
 HEADER_LEN = 21
@@ -148,6 +150,7 @@ class Packet:
     prediction: Prediction | None = None
     model_ack: ModelAck | None = None
     diag: Diag | None = None
+    log: str | None = None
 
 
 def _mac_str(raw: bytes) -> str:
@@ -191,6 +194,7 @@ def parse_packet(buf: bytes, key: bytes) -> Packet:
     prediction: Prediction | None = None
     model_ack: ModelAck | None = None
     diag: Diag | None = None
+    text: str | None = None
     if ptype in CSI_TYPES:
         for _ in range(n):
             if off + _FRAME.size > len(body):
@@ -253,11 +257,16 @@ def parse_packet(buf: bytes, key: bytes) -> Packet:
                 off += 1 + 4 * bn
             extra = ((r0, r1), ek, ecause, epc, bt)
         diag = Diag(boots, up, pc, exc, core, hist, msg, *extra)
+    elif ptype == TYPE_LOG:
+        if n != 1 or off + 1 > len(body) or body[off] > LOG_MAX or off + 1 + body[off] > len(body):
+            raise ProtocolError("length: log")
+        text = bytes(body[off + 1 : off + 1 + body[off]]).decode("utf-8", "replace")
+        off += 1 + body[off]
     else:
         raise ProtocolError(f"unsupported type {ptype}")
     if off != len(body):
         raise ProtocolError("length: trailing bytes")
-    return Packet(ptype, _mac_str(dev), boot_id, seq, frames, telemetry, prediction, model_ack, diag)
+    return Packet(ptype, _mac_str(dev), boot_id, seq, frames, telemetry, prediction, model_ack, diag, text)
 
 
 def encode_packet(
@@ -270,6 +279,7 @@ def encode_packet(
     telemetry: Telemetry | None = None,
     prediction: Prediction | None = None,
     diag: Diag | None = None,
+    log: str | None = None,
 ) -> bytes:
     parts: list[bytes] = []
     if type in CSI_TYPES:
@@ -311,6 +321,12 @@ def encode_packet(
             raise ProtocolError("diag backtrace too long")
         parts.append(_DIAG_TAIL.pack(*diag.rom_rst, diag.early_kind, diag.early_cause, diag.early_pc))
         parts.append(struct.pack(f"<B{len(diag.backtrace)}I", len(diag.backtrace), *diag.backtrace))
+    elif type == TYPE_LOG:
+        if log is None:
+            raise ProtocolError("log required")
+        n = 1
+        t = log.encode()[:LOG_MAX]
+        parts.append(bytes([len(t)]) + t)
     else:
         raise ProtocolError(f"unsupported type {type}")
     body = _HEADER.pack(MAGIC, VERSION, type, _mac_bytes(device_id), boot_id, seq, n) + b"".join(parts)

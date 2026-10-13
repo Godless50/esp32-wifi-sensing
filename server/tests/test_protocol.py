@@ -133,3 +133,14 @@ def test_diag_roundtrip_and_bounds():
     assert parse_packet(_resign(bytes(old)), KEY).diag == d
     v2 = bytearray(encode_packet(TYPE_DIAG, MAC, 3, 1, KEY, diag=d)[:-HMAC_LEN - 1])  # хвост без трассы
     assert parse_packet(_resign(bytes(v2)), KEY).diag == d
+
+
+def test_log_line_roundtrip_and_bounds():
+    from wsn.protocol import LOG_MAX, TYPE_LOG
+    p = parse_packet(encode_packet(TYPE_LOG, MAC, 3, 1, KEY, log="stack free: uplink=1200"), KEY)
+    assert p.log == "stack free: uplink=1200"
+    assert len(parse_packet(encode_packet(TYPE_LOG, MAC, 3, 1, KEY, log="x" * 500), KEY).log) == LOG_MAX
+    body = bytearray(encode_packet(TYPE_LOG, MAC, 3, 1, KEY, log="abc")[:-HMAC_LEN])
+    body[HEADER_LEN] = 9  # длина больше, чем есть байт
+    with pytest.raises(ProtocolError):
+        parse_packet(_resign(bytes(body)), KEY)

@@ -75,5 +75,10 @@ int main(void)
     d.n = 3;
     d.bt_n = WSN_DIAG_BT + 1;
     if (wsn_encode_diag(&c, &d, out, sizeof(out)) != -5) return 1;
+
+    /* seq 13: text line */
+    n = wsn_encode_log(&c, "romif +0x128 3fc9a000->00000000", out, sizeof(out));
+    if (n < 0) return 1;
+    hex(out, n);
     return 0;
 }

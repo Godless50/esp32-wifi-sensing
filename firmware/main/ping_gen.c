@@ -1,64 +1,100 @@
+/* ICMP echo requests to the gateway at a fixed rate; every reply is a frame from the access point, so it carries
+ * CSI of the link "access point -> board".
+ *
+ * The rate does not depend on the round trip: requests go out on a timer and replies are only drained. esp_ping
+ * (used before) waits for each reply, so through a mesh node (round trip 30-40 ms) 100 Hz became ~25 Hz, and it
+ * was restarted every 10 s (a new task each time) by the stall check. Here one task lives for the whole boot. */
 #include "ping_gen.h"
+
+#include <errno.h>
+#include <string.h>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "lwip/ip_addr.h"
-#include "ping/ping_sock.h"
+#include "freertos/task.h"
+#include "lwip/inet_chksum.h"
+#include "lwip/prot/icmp.h"
+#include "lwip/sockets.h"
 
 static const char *TAG = "ping_gen";
-static esp_ping_handle_t s_ping;
+
+#define PAYLOAD 16
+
+static TaskHandle_t s_task;
 static SemaphoreHandle_t s_lock;
+static volatile uint32_t s_gw;  /* 0 = stopped */
+static volatile uint16_t s_hz;
+static volatile uint32_t s_gen; /* bumped on every start: the task restarts its timing */
 
-static void ensure_lock(void)
+static void ping_task(void *arg)
 {
-    if (!s_lock) s_lock = xSemaphoreCreateMutex(); /* first call happens before concurrency */
-}
-
-static void stop_locked(void)
-{
-    if (s_ping) {
-        esp_ping_stop(s_ping);
-        esp_ping_delete_session(s_ping);
-        s_ping = NULL;
+    int sock = -1;
+    uint32_t gen = 0;
+    uint16_t seq = 0;
+    uint8_t pkt[sizeof(struct icmp_echo_hdr) + PAYLOAD];
+    uint8_t rx[128];
+    TickType_t last = xTaskGetTickCount();
+    for (;;) {
+        if (!s_gw) {
+            if (sock >= 0) {
+                close(sock);
+                sock = -1;
+            }
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+        if (sock < 0) {
+            sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+            if (sock < 0) {
+                ESP_LOGW(TAG, "raw socket: errno %d, retry in 1 s", errno);
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+        }
+        if (gen != s_gen) {
+            gen = s_gen;
+            last = xTaskGetTickCount();
+        }
+        struct icmp_echo_hdr *h = (struct icmp_echo_hdr *)pkt;
+        memset(pkt, 0, sizeof(pkt));
+        h->type = ICMP_ECHO;
+        h->id = 0x5753; /* "WS" */
+        h->seqno = lwip_htons(++seq);
+        for (int i = 0; i < PAYLOAD; i++) pkt[sizeof(*h) + i] = (uint8_t)i;
+        h->chksum = inet_chksum(pkt, sizeof(pkt));
+        struct sockaddr_in to = {.sin_family = AF_INET, .sin_addr.s_addr = s_gw};
+        sendto(sock, pkt, sizeof(pkt), 0, (struct sockaddr *)&to, sizeof(to)); /* очередь полна — уйдёт следующий */
+        while (recv(sock, rx, sizeof(rx), MSG_DONTWAIT) > 0) { /* ответы нужны радио (CSI), не программе */
+        }
+        uint16_t hz = s_hz ? s_hz : 1;
+        TickType_t period = pdMS_TO_TICKS(1000 / hz);
+        vTaskDelayUntil(&last, period ? period : 1);
     }
 }
 
 esp_err_t ping_gen_start(esp_ip4_addr_t gw, uint16_t hz)
 {
-    ensure_lock();
+    if (!s_lock) s_lock = xSemaphoreCreateMutex(); /* первый вызов — из обработчика событий Wi-Fi, до uplink */
+    if (!s_lock) return ESP_ERR_NO_MEM;
     if (hz < 1) hz = 1;
     if (hz > 200) hz = 200;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    stop_locked();
-    esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
-    ip_addr_t target = {0};
-    target.type = IPADDR_TYPE_V4;
-    target.u_addr.ip4.addr = gw.addr;
-    cfg.target_addr = target;
-    cfg.count = ESP_PING_COUNT_INFINITE;
-    cfg.interval_ms = 1000 / hz;
-    /* esp_ping waits for the reply before the next echo: a long timeout turns one lost reply into a gap */
-    cfg.timeout_ms = cfg.interval_ms * 2 < 20 ? 20 : cfg.interval_ms * 2;
-    cfg.data_size = 16;
-    cfg.task_stack_size = 3072;
-    esp_ping_callbacks_t cbs = {0};
-    esp_err_t err = esp_ping_new_session(&cfg, &cbs, &s_ping);
-    if (err == ESP_OK) err = esp_ping_start(s_ping);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "start failed: %s", esp_err_to_name(err));
-        stop_locked();
-    } else {
-        ESP_LOGI(TAG, "pinging " IPSTR " at %u Hz", IP2STR(&gw), hz);
+    s_hz = hz;
+    s_gw = gw.addr;
+    s_gen++;
+    esp_err_t err = ESP_OK;
+    if (!s_task && xTaskCreatePinnedToCore(ping_task, "ping_gen", 3072, NULL, 5, &s_task, 1) != pdPASS) {
+        s_task = NULL;
+        err = ESP_ERR_NO_MEM;
     }
+    if (s_task) xTaskNotifyGive(s_task);
     xSemaphoreGive(s_lock);
+    if (err == ESP_OK) ESP_LOGI(TAG, "pinging " IPSTR " at %u Hz", IP2STR(&gw), hz);
     return err;
 }
 
 void ping_gen_stop(void)
 {
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    stop_locked();
-    xSemaphoreGive(s_lock);
+    s_gw = 0;
 }

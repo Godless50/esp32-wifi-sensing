@@ -284,3 +284,13 @@ def test_diag_is_exposed_per_device():
     (st,) = hub.devices(now=1.0)
     assert st.boot_id == 9 and st.diag["last"] == ["PANIC/6", "POWERON/1"]
     assert st.diag["panic"]["msg"] == "LoadProhibited" and st.diag["prev_uptime_s"] == 120
+
+
+def test_log_lines_are_kept_per_device():
+    from wsn.live import LOG_KEEP
+    from wsn.protocol import TYPE_LOG
+    hub = LiveHub()
+    for i in range(LOG_KEEP + 5):
+        hub.on_packet(Packet(TYPE_LOG, MAC, 9, i, log=f"line {i}"), 1.0)
+    (st,) = hub.devices(now=1.0)
+    assert len(st.log) == LOG_KEEP and st.log[-1].endswith(f"line {LOG_KEEP + 4}")

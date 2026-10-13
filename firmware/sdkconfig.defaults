@@ -16,3 +16,15 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_SPIRAM_SPEED_80M=y
 # приём Wi-Fi/CSI из IRAM: было падение «Cache disabled but cached memory region accessed» в wDev_SnifferRxData
 CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
+
+# отладка порчи кучи (13.10): метки вокруг блоков, проверка в guard.c
+CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+# задача системных событий: обработчик подключения Wi-Fi (on_link) брал до 2020 из 2304 байт стека (13.10)
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144
+# Wi-Fi и lwIP на одном ядре; приёмный буфер Wi-Fi копируется и сразу возвращается драйверу (13.10: падения при
+# освобождении приёмных буферов с ядра 1: ppRecycleRxPkt, assert в pbuf_free, порча кучи)
+CONFIG_LWIP_L2_TO_L3_COPY=y
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+# 13.10: с агрегацией приёма (A-MPDU) библиотека Wi-Fi при включённом CSI портила память (memcpy в wDev_IndicateFrame
+# писал в указатели ПЗУ: поймано точкой останова). Без неё ответы точки доступа идут отдельными кадрами — CSI на каждый.
+# CONFIG_ESP_WIFI_AMPDU_RX_ENABLED is not set

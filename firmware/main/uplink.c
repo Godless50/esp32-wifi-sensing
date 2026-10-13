@@ -1,5 +1,7 @@
 #include "uplink.h"
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "csi_capture.h"
@@ -8,6 +10,7 @@
 #include "esp_mac.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
+#include "guard.h"
 #include "infer.h"
 #include "model_ota.h"
 #include "lwip/netdb.h"
@@ -21,13 +24,49 @@
 static const char *TAG = "uplink";
 
 #define FLUSH_US 50000
-#define STALL_HZ 20.0f
+#define STALL_HZ 5.0f  /* ответов точки доступа почти нет: пересоздать сокет пинга */
 #define STALL_SECONDS 10
 
 #define RESOLVE_RETRY_US 5000000
 #define DIAG_EVERY_US 60000000 /* история перезапусков: сервер мог перезапуститься и её не видеть */
 
 void diag_get(wsn_diag_t *d); /* app_main.c */
+#define GUARD_ARM_S 40          /* снимок указателей Wi-Fi в ПЗУ — когда инициализация точно закончилась */
+#define STACKS_EVERY_US 300000000 /* отчёт о стеках задач: через минуту после старта и раз в 5 минут */
+
+#define LOG_Q 8
+static char s_logq[LOG_Q][WSN_LOG_MAX + 1];
+static uint32_t s_log_w, s_log_r;
+static portMUX_TYPE s_log_mux = portMUX_INITIALIZER_UNLOCKED;
+
+void uplink_log(const char *fmt, ...)
+{
+    char line[WSN_LOG_MAX + 1];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    portENTER_CRITICAL(&s_log_mux);
+    if (s_log_w - s_log_r < LOG_Q) {
+        memcpy(s_logq[s_log_w % LOG_Q], line, sizeof(line));
+        s_log_w++;
+    }
+    portEXIT_CRITICAL(&s_log_mux);
+    ESP_LOGW("remote", "%s", line);
+}
+
+static bool log_pop(char *line)
+{
+    bool ok = false;
+    portENTER_CRITICAL(&s_log_mux);
+    if (s_log_r != s_log_w) {
+        memcpy(line, s_logq[s_log_r % LOG_Q], WSN_LOG_MAX + 1);
+        s_log_r++;
+        ok = true;
+    }
+    portEXIT_CRITICAL(&s_log_mux);
+    return ok;
+}
 
 static wsn_settings_t s_cfg;
 static uint32_t s_boot_id;
@@ -75,6 +114,7 @@ static void uplink_task(void *arg)
     int stall_s = 0;
     int64_t next_resolve = 0;
     int64_t next_diag = 0;
+    int64_t next_stacks = 60000000;
     esp_task_wdt_add(NULL);
     ESP_LOGI(TAG, "boot_id %lu -> %s:%u", (unsigned long)ctx.boot_id, s_cfg.host, s_cfg.port);
 
@@ -117,6 +157,10 @@ static void uplink_task(void *arg)
         }
         wsn_model_ack_t ack;
         if (model_ota_status(&ack)) send_pkt(sock, &dst, out, wsn_encode_model_ack(&ctx, &ack, out, sizeof(out)));
+        if (sock >= 0) {
+            static char line[WSN_LOG_MAX + 1];
+            if (log_pop(line)) send_pkt(sock, &dst, out, wsn_encode_log(&ctx, line, out, sizeof(out)));
+        }
         int64_t now = esp_timer_get_time();
         if (n > 0 && (n >= WSN_MAX_FRAMES || now - first_us >= FLUSH_US)) {
             send_pkt(sock, &dst, out, wsn_encode_csi_src(&ctx, batch, n, out, sizeof(out)));
@@ -143,6 +187,15 @@ static void uplink_task(void *arg)
             };
             send_pkt(sock, &dst, out, wsn_encode_telem(&ctx, &t, out, sizeof(out)));
             panic_trace_tick(t.uptime_s);
+            if (t.uptime_s >= GUARD_ARM_S) {
+                guard_arm(); /* один раз за загрузку */
+                guard_check();
+            }
+            if ((t.uptime_s & 1) == 0) guard_heap_check();
+            if (now >= next_stacks) {
+                guard_report_stacks();
+                next_stacks = now + STACKS_EVERY_US;
+            }
             if (sock >= 0 && now >= next_diag) {
                 static wsn_diag_t d;
                 diag_get(&d);

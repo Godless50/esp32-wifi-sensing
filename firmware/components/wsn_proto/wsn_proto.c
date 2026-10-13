@@ -185,6 +185,18 @@ int wsn_encode_diag(wsn_ctx_t *ctx, const wsn_diag_t *d, uint8_t *out, size_t ca
     return finish(ctx, out, p);
 }
 
+int wsn_encode_log(wsn_ctx_t *ctx, const char *text, uint8_t *out, size_t cap)
+{
+    if (!ctx || !ctx->hmac || !text || !out) return -1;
+    size_t n = 0;
+    while (n < WSN_LOG_MAX && text[n]) n++;
+    if (cap < WSN_HEADER_LEN + 1 + n + WSN_HMAC_LEN) return -4;
+    uint8_t *p = put_header(ctx, out, WSN_TYPE_LOG, 1);
+    p = put_u8(p, (uint8_t)n);
+    memcpy(p, text, n);
+    return finish(ctx, out, p + n);
+}
+
 static uint32_t get_u32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 
 int wsn_parse_model_chunk(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_model_chunk_t *out)
