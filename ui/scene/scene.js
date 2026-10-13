@@ -363,6 +363,31 @@ function applyPose(name, walking, t, dt) {
   fig.root.rotation.y = heading;
 }
 let person = null, personLabel = null, personLabelText = "", personPlaced = false, lastFrame = 0;
+// «людей не меньше N»: в комнатах, где линии показывают движение, которое один человек не объясняет, — серые фигуры
+const extraMat = new THREE.MeshStandardMaterial({ color: 0xb0b6c0, emissive: 0x6a7280, emissiveIntensity: 0.3, transparent: true, opacity: 0.8 });
+const extras = new Map();  // комната -> {group, sprite}
+function extraFigure() {
+  const g = new THREE.Group();
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.15, 0.6, 6, 12), extraMat); torso.position.y = 1.15;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12), extraMat); head.position.y = 1.62;
+  const legs = new THREE.Mesh(new THREE.CapsuleGeometry(0.1, 0.7, 6, 12), extraMat); legs.position.y = 0.45;
+  g.add(torso, head, legs);
+  return g;
+}
+function drawExtras(rooms, mainZone) {
+  const want = new Set((rooms || []).filter((r) => r !== mainZone));
+  for (const [r, e] of extras) if (!want.has(r)) { scene.remove(e.group, e.sprite); extras.delete(r); }
+  for (const r of want) {
+    if (extras.has(r)) continue;
+    const shape = zoneShapes.find((x) => x.name === r);
+    if (!shape) continue;
+    const [cx, cy] = centroid(shape.poly);
+    const group = extraFigure(); group.position.copy(v3(cx, cy, 0));
+    const sprite = label("ещё кто-то движется", "#c9ced6", 0.3); sprite.position.copy(v3(cx, cy, 2.0));
+    scene.add(group, sprite);
+    extras.set(r, { group, sprite });
+  }
+}
 const personPos = new THREE.Vector3();
 const personBox = document.getElementById("personBox");
 const heatToggle = document.getElementById("heat");
@@ -420,6 +445,7 @@ function drawPerson(now, dt) {
   const live = person && now - person.seen < PERSON_FRESH_MS;
   heatMesh.visible = !!live && heatToggle.checked;
   drawCounts(live ? person.counts : null);
+  drawExtras(live && person.min_people >= 2 ? person.min_rooms : [], live ? person.zone : null);
   if (!live || !person.present) {
     personGroup.visible = false;
     if (personLabel) personLabel.visible = false;

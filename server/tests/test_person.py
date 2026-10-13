@@ -226,3 +226,15 @@ def test_zone_answers_only_from_the_board_the_models_were_trained_on():
     b = tr.belief.copy()
     tr.on_message(pred(6.25, pa=0.0, dev="d2"))  # модель второй платы этим линиям не учена
     assert len(out) == n and np.allclose(tr.belief, b)
+
+
+def test_reset_forgets_a_stuck_position(tmp_path):
+    p = tmp_path / "person.json"
+    tr, out = tracker(p)
+    t = feed(tr, 0.0, 8.0, pa=0.05)
+    feed(tr, t, t + 40, pa=0.05, moving=0.02, step=1.0)
+    assert p.exists()
+    tr.reset()
+    assert not p.exists() and tr.xy is None and np.allclose(tr.belief, 1.0 / tr.grid.n)
+    tr.on_message(pred(100.0, pa=0.5, moving=0.02))
+    assert out[-1]["status"] == "ждём движения"

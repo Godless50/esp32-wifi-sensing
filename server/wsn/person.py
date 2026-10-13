@@ -62,7 +62,7 @@ FRESNEL_M = 0.6
 SAME_ROOM_S = 0.3
 LINK_W = 1.5  # линии (геометрия) — главный источник для комнат, где модель не видела движения
 LINK_MAX_AGE_S = 2.0
-QUIET_LINK = 0.3
+QUIET_LINK = 0.0  # тихая линия ничего не говорит о месте: неподвижный человек линии не возмущает
 
 MOVE_EMA_S = 1.0
 MOVE_ON, MOVE_OFF, MOVE_ON_S, MOVE_OFF_S = 0.6, 0.35, 0.5, 3.0
@@ -571,6 +571,20 @@ class PersonTracker:
         self.last = out
         self._save_state(now)
         return out
+
+    def reset(self) -> None:
+        """Forget the position (wrong after a stuck estimate): uniform belief, waiting for movement again."""
+        with self._lock:
+            if self.grid is not None:
+                self.belief = np.full(self.grid.n, 1.0 / self.grid.n)
+                self.geo = self.belief.copy()
+            self.shown = self._cand = self.xy = None
+            self.last_moving_t = None
+            self.left = False
+            self._stop_near_exit = False
+            self._saved_at = -1e9
+            if self.state_path is not None and self.state_path.exists():
+                self.state_path.unlink()
 
     def snapshot(self) -> dict:
         with self._lock:

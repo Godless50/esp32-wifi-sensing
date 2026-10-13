@@ -354,6 +354,12 @@ def create_app(
         person.set_plan(plan)
         return plan
 
+    @app.delete("/api/person")
+    def api_person_reset() -> dict:
+        """Forget the tracked position (the tracker then waits for movement again)."""
+        person.reset()
+        return {"ok": True}
+
     @app.get("/api/person")
     def api_person() -> dict:
         """Last tracked position of the person, grid size and per-link noise floors (for debugging)."""
