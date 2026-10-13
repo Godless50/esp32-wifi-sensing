@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from typing import Callable
 
@@ -26,6 +26,16 @@ from .store import SessionBusy, SessionNotFound, Store
 
 log = logging.getLogger(__name__)
 TICK_S = 5.0
+
+
+class ZoneLabel(BaseModel):
+    count: int = Field(ge=0, le=20)
+    activity: str = Field(default="", max_length=40)
+
+
+class OccupancyLabel(BaseModel):
+    zones: dict[str, ZoneLabel]
+    note: str = Field(default="", max_length=200)
 
 
 class StartSession(BaseModel):
@@ -117,6 +127,17 @@ def create_app(
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         return dataclasses.asdict(info)
+
+    @app.post("/api/labels")
+    def add_label(req: OccupancyLabel) -> dict:
+        """Разметка «кто где»: пишется событием occupancy в активную запись с серверным временем."""
+        st = _store()
+        s = st.active()
+        if s is None:
+            raise HTTPException(409, "no active session")
+        st.append_event({"seq": None, "t": time.monotonic(), "kind": "occupancy",
+                         "zones": {k: v.model_dump() for k, v in req.zones.items()}, "note": req.note})
+        return {"session": s.id}
 
     @app.post("/api/sessions/{sid}/stop")
     def stop_session(sid: str) -> dict:

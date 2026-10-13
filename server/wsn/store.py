@@ -18,7 +18,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-KINDS = ("walk", "empty")
+KINDS = ("walk", "empty", "static")  # static: люди неподвижны, разметка словами, без телефона
 _REC = struct.Struct("<QH")
 
 
@@ -105,6 +105,8 @@ class Store:
             raise ValueError(f"kind must be one of {KINDS}")
         if kind == "empty" and duration_s is None:
             duration_s = 600.0
+        if kind == "static" and duration_s is None:
+            duration_s = 1200.0
         if duration_s is not None and not (10.0 <= duration_s <= 4 * 3600):
             raise ValueError("duration_s must be within 10 s .. 4 h")
         with self._lock:

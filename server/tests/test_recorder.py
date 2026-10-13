@@ -81,3 +81,32 @@ async def test_rest_sessions(rig):
         assert (await c.delete(f"/api/sessions/{sid}")).status_code == 200
         assert (await c.get("/api/sessions")).json() == []
         assert (await c.post("/api/sessions/nope/stop")).status_code == 404
+
+
+def test_static_session_runs_for_its_duration(rig):
+    store, rec, _, _ = rig
+    s = store.start_session("static", DEV, now=0.0)
+    assert s.duration_s == 1200.0  # по умолчанию 20 мин
+    rec.tick(now=600.0)  # люди неподвижны, телефона нет — запись продолжается
+    assert store.active() is not None
+    rec.tick(now=1201.0)
+    assert store.active() is None
+
+
+async def test_occupancy_labels(rig):
+    import json
+    store, _, _, app = rig
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        body = {"zones": {"спальня": {"count": 2, "activity": "сон"}, "зал": {"count": 1, "activity": "сидит"}},
+                "note": "начало"}
+        assert (await c.post("/api/labels", json=body)).status_code == 409  # нет записи — некуда писать
+        sid = (await c.post("/api/sessions", json={"kind": "static", "device_id": DEV, "duration_s": 60})).json()["id"]
+        r = await c.post("/api/labels", json=body)
+        assert r.status_code == 200 and r.json()["session"] == sid
+        bad = await c.post("/api/labels", json={"zones": {"зал": {"count": -1}}})
+        assert bad.status_code == 422
+        await c.post(f"/api/sessions/{sid}/stop")
+    evs = [json.loads(x) for x in (store.session_dir(sid) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    (lab,) = [e for e in evs if e["kind"] == "occupancy"]
+    assert lab["zones"]["спальня"] == {"count": 2, "activity": "сон"} and lab["note"] == "начало"
+    assert isinstance(lab["t"], float)
