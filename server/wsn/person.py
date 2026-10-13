@@ -45,6 +45,7 @@ OPENING_MARGIN_M = 0.15
 
 PRED_MAX_AGE_S = 2.0
 MIN_LINKS_LIVE = 4
+LINKS_STEP_S = 0.25  # шаг фильтра без ответа модели (по активности линий)
 P_FLOOR = 0.05
 # Зоны: если в ответе есть counts_probs (многоголовая модель, все комнаты плана) — свидетельство «в зоне кто-то
 # двигается» по каждой комнате. Иначе (модель на 4 зоны) комнаты, которых она не знает, получают нейтральное 1/K.
@@ -337,8 +338,18 @@ class PersonTracker:
     def on_message(self, msg: dict) -> None:
         kind = msg.get("type")
         if kind == "motion":
+            out = rooms = None
             with self._lock:
                 self._on_motion(msg)
+                t = float(msg["t"])
+                if self.grid is not None and (self._t is None or t - self._t >= 2 * LINKS_STEP_S):
+                    # ответов модели нет совсем (обучение/плата остановлены): шаг по линиям всё равно идёт
+                    out = self._on_pred({"type": "pred", "t": t, "links_live": 0})
+                    rooms = self._room_states(self._t) if self._t is not None else None
+            if self.publish is not None:
+                for m in (out, rooms):
+                    if m is not None:
+                        self.publish(m)
         elif kind == "breath":
             if msg.get("ok"):
                 with self._lock:
@@ -432,7 +443,15 @@ class PersonTracker:
             return None
         t = float(msg["t"])
         now = max(t, self._t or t)
-        self._smooth_extras(msg, t)
+        # Ответ модели годится, только если живы её линии. Модели обучены на линиях из режима прослушивания эфира
+        # (точки доступа, бытовые устройства); без него живы 1-2 из 10, и раньше такой ответ просто выбрасывался —
+        # карта стояла на «ждём данных». Теперь шаг идёт по активности всех текущих линий, модель — только добавка.
+        model_ok = msg.get("links_live") is None or int(msg["links_live"]) >= MIN_LINKS_LIVE
+        if not model_ok:
+            msg = {k: v for k, v in msg.items() if k in ("type", "t", "device_id")}
+            msg["source"] = "links"
+        else:
+            self._smooth_extras(msg, t)
         if self._restore is not None:  # после перезапуска: человек неподвижен с того же момента
             w = self._restore.get("still_wall")
             if w is not None:
@@ -442,21 +461,24 @@ class PersonTracker:
         skey = (source, str(msg.get("device_id", "")).lower())
         if now - t > PRED_MAX_AGE_S:
             return None
-        if msg.get("links_live") is not None and int(msg["links_live"]) < MIN_LINKS_LIVE:
-            return None
-        if g.model_board and str(msg.get("device_id", "")).lower() not in (g.model_board, ""):
+        if model_ok and g.model_board and str(msg.get("device_id", "")).lower() not in (g.model_board, ""):
             return None
         probs = msg.get("probs") or {}
-        if not probs:
+        if model_ok and not probs:
             return None
+        if not model_ok:  # шаг только по линиям: не чаще, чем раз в LINKS_STEP_S, сколько бы источников ни было
+            if self._t is not None and now - self._t < LINKS_STEP_S:
+                return None
+            skey = ("links", "")
         dt_src = min(1.0, max(0.0, t - self._last_pred.get(skey, t - 1.0)))
         self._last_pred[skey] = t
         self._src_t[source] = t
         # движение: EMA по каждому источнику, потом среднее свежих + активность линий
-        mt, mv = self._mv.get(skey, (t, float(msg.get("moving_p", 0.0))))
-        a = 1.0 - math.exp(-max(0.0, t - mt) / MOVE_EMA_S) if skey in self._mv else 1.0
-        mv += a * (float(msg.get("moving_p", 0.0)) - mv)
-        self._mv[skey] = (t, mv)
+        if model_ok:
+            mt, mv = self._mv.get(skey, (t, float(msg.get("moving_p", 0.0))))
+            a = 1.0 - math.exp(-max(0.0, t - mt) / MOVE_EMA_S) if skey in self._mv else 1.0
+            mv += a * (float(msg.get("moving_p", 0.0)) - mv)
+            self._mv[skey] = (t, mv)
         fresh = [v for (tt, v) in self._mv.values() if now - tt <= PRED_MAX_AGE_S]
         model_mv = sum(fresh) / len(fresh) if fresh else 0.0
         acts = self._link_activity(now)
@@ -490,7 +512,9 @@ class PersonTracker:
         b = g.diffuse(b, steps)
         geo = g.diffuse(self.geo, steps)
         cp = msg.get("counts_probs")
-        if cp:  # P(в зоне двигается хотя бы один) — только по зонам, где у модели были настоящие примеры движения
+        if not probs:  # ответа модели нет: зона только по линиям и по платам
+            p_label = np.ones(len(g.labels))
+        elif cp:  # P(в зоне двигается хотя бы один) — только по зонам, где у модели были настоящие примеры движения
             known = {z: 1.0 - float(v[0]) for z, v in cp.items() if z in probs}
             neutral = sum(known.values()) / len(known) if known else 0.5
             p_label = np.array([known.get(z, neutral) for z in g.labels])

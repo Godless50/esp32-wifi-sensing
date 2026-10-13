@@ -93,16 +93,34 @@ def test_room_the_models_never_saw_moving_is_reached_through_the_links():
     assert out[-1]["zone"] == "C" and out[-1]["geo"]["zone"] == "C"
 
 
-def test_stale_and_low_link_answers_are_ignored():
+def test_low_link_answers_do_not_move_the_zone_but_the_map_keeps_running():
     tr, out = tracker()
     feed(tr, 0.0, 3.0, pa=0.95)
-    b = tr.belief.copy()
-    n = len(out)
-    tr.on_message(pred(10.0, pa=0.0, links_live=2))  # мало живых линий
-    assert np.allclose(tr.belief, b) and len(out) == n
-    tr.on_message(pred(10.0, pa=0.95, source="server"))
-    tr.on_message(pred(5.0, pa=0.0, source="server"))  # старше 2 с относительно текущего времени
+    t = feed(tr, 3.0, 8.0, pa=0.0, links_live=1)  # модель «говорит» B, но её линии мертвы
+    assert out[-1]["zone"] == "A" and out[-1]["t"] > 7.0  # карта обновляется, зона по мусорному ответу не уехала
+    tr.on_message(pred(t, pa=0.95, source="server"))
+    tr.on_message(pred(t - 5.0, pa=0.0, source="server"))  # старше 2 с относительно текущего времени
     assert out[-1]["zone"] == "A"
+
+
+def test_map_runs_on_links_alone_when_no_model_links_are_alive():
+    """13.10: прослушивание эфира выключено, у моделей живо 1 линия из 10 — раньше карта стояла на «ждём данных»."""
+    tr, out = tracker()
+    t = 0.0
+    for k in range(60):  # пол шума линий обеих плат
+        for dev, mac in (("d1", "aa:00:00:00:00:01"), ("d2", "aa:00:00:00:00:02")):
+            for extra in ("", "b", "c"):
+                tr.on_message({"type": "motion", "device_id": dev, "src": mac + extra, "t": t,
+                               "raw": 1.0 + 0.05 * (k % 3)})
+        tr.on_message(pred(t, pa=0.5, links_live=1))
+        t += 0.25
+    for k in range(60):  # движение у платы d2 (комната B)
+        for extra in ("", "b", "c"):
+            tr.on_message({"type": "motion", "device_id": "d2", "src": "aa:00:00:00:00:02" + extra, "t": t, "raw": 6.0})
+            tr.on_message({"type": "motion", "device_id": "d1", "src": "aa:00:00:00:00:01" + extra, "t": t, "raw": 1.0})
+        t += 0.25  # ответов модели нет вовсе: шаг по линиям всё равно идёт
+    assert out and out[-1]["t"] > t - 1.0 and out[-1]["moving"]
+    assert tr.rooms_out, "room states must be published"
 
 
 def test_moving_has_hysteresis():
