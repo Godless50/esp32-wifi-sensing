@@ -5,13 +5,18 @@ Every second, per board: the last 4 s of every link -> build_seq.link_seq -> the
 (data/ml/live_model, CPU inference) -> POST /api/predict -> 3D scene. The window is kept in a ring buffer.
 
 Online learning, every --adapt-min minutes when the buffer has enough fresh windows (GPU, background thread):
-  * pseudo-labels: activity where the ensemble is confident (>= --conf), zone only where somebody moves and the
-    zone is confident; the rest of the live windows still train the "somebody moves" head where it is confident;
-  * anchor: all labelled windows (scripted + spoken sessions) are mixed in, so the model cannot drift away from
-    what is known; augmentation is the same as in offline training;
+  * teacher = physics, never the model itself. Until 13.10 the model learned from its own confident answers and
+    the guard scored it on sessions that were also in its training mix: every update looked fine and the answers
+    collapsed to one zone / activity ("зал" 34% -> 85% of the same live windows in 3.5 h). Now the labels come from
+    the tracker state stored with each window (link geometry, no neural net): "somebody moves" from disturbed links,
+    zone only when one region moves and the link-only estimate is sure (--geo-conf), "no movement" after a long
+    still period;
+  * anchor: the labelled training sessions are mixed in; the validation sessions are NOT (honest guard);
   * each net continues from its current weights with a small learning rate for a few epochs;
-  * guard: the candidate must not be worse than the current model on the labelled scripted windows (zone and
-    activity balanced accuracy, tolerance --tol) and must not collapse to one class on the live buffer.
+  * guard, all of: not worse on the held-out labelled sessions (zone, activity; --tol); agrees with the teacher on
+    the newest 25% of live windows (not used for training) at least as well as the current model; the zone answers
+    on the live buffer stay close to the reference model (--reference, the offline model; L1 of the histograms
+    <= --max-drift) and no class takes over.
     Accepted -> the old model is kept as live_model.prev, the new one goes live; rejected -> nothing changes.
   Every attempt is appended to data/ml/live_model/history.jsonl.
 
@@ -59,6 +64,27 @@ from wsn.protocol import TYPE_CSI_SRC, ProtocolError, parse_packet, peek_device_
 
 log = logging.getLogger("learner")
 WIN_S, KEEP_S, LAG_S = 4.0, 12.0, 0.3
+VAL_SESSIONS = ("20261013-053501-ee64", "20261013-065019-45cd")  # только для проверки, в дообучение не идут
+
+
+class _Skip(Exception):
+    """Not enough teacher labels for an online update (the extras update still runs)."""
+
+
+def teacher_labels(T: list, zones: list[str], geo_conf: float):
+    """Labels from the physics teacher (tracker state at window time): activity, zone, somebody-moves; -1 = none."""
+    n = len(T)
+    ya, yz, ym = np.full(n, -1), np.full(n, -1), np.full(n, -1)
+    for i, te in enumerate(T):
+        if not te:
+            continue
+        if te["moving"] and te.get("links_active", 0) >= 2:
+            ym[i] = 1
+            if te["min_people"] <= 1 and te["geo_p"] >= geo_conf and te["geo_zone"] in zones:
+                yz[i] = zones.index(te["geo_zone"])
+        elif te["status"] == "неподвижен" and (te.get("still_s") or 0) >= 30:
+            ym[i], ya[i] = 0, 0  # activity 0 = "нет движения"
+    return ya, yz, ym
 
 
 def load_extras(path: Path):
@@ -190,7 +216,10 @@ class Learner:
         self.anchor_X = d["X"].astype(np.float32)
         self.anchor_y = labels(d)
         sess = d["session"]
-        self.val = np.isin(sess, ["20261013-053501-ee64", "20261013-065019-45cd"]) & (self.anchor_y[0] >= 0)
+        self.val = np.isin(sess, VAL_SESSIONS) & (self.anchor_y[0] >= 0)
+        self.train_anchor = ~np.isin(sess, VAL_SESSIONS)
+        self.ref = load_model(Path(a.reference))[1] if a.reference and Path(a.reference, "meta.json").exists() else None
+        self.last_push = 0.0
         log.info("model v%s (%d nets), anchor %d windows", self.meta["version"], len(self.nets), len(self.anchor_X))
 
     def teacher(self) -> dict | None:
@@ -225,7 +254,7 @@ class Learner:
         if np.abs(X).sum() > 0:
             self.buf_X.append(X.astype(np.float16))
             self.buf_t.append(time.time())
-            self.buf_teach.append(self.teacher() if self.extras is not None else None)
+            self.buf_teach.append(self.teacher())
             self.since_adapt += 1
 
     def scores(self, nets):
@@ -242,30 +271,45 @@ class Learner:
             with self.lock:
                 nets, meta = self.nets, self.meta
             L = np.stack(list(self.buf_X)).astype(np.float32)
-            pa, pz, pm = ensemble(nets, L)
-            ca, cz = pa.max(1), pz.max(1)
-            pl_a = np.where(ca >= a.conf, pa.argmax(1), -1)
-            pl_z = np.where((pl_a > 0) & (cz >= a.conf), pz.argmax(1), -1)
-            pl_m = np.where(pm >= a.conf, 1, np.where(pm <= 1 - a.conf, 0, -1))
-            keep = (pl_a >= 0) | (pl_m >= 0)
-            X = np.concatenate([self.anchor_X, L[keep]])
-            ya = np.concatenate([self.anchor_y[0], pl_a[keep]])
-            yz = np.concatenate([self.anchor_y[1], pl_z[keep]])
-            ym = np.concatenate([self.anchor_y[2], pl_m[keep]])
+            ya_l, yz_l, ym_l = teacher_labels(list(self.buf_teach), meta["zones"], a.geo_conf)
+            cut = int(len(L) * 0.75)  # новые 25% живых окон — только для проверки
+            tr = np.arange(len(L)) < cut
+            if int((yz_l[tr] >= 0).sum()) < a.min_teacher or int((yz_l[~tr] >= 0).sum()) < a.min_teacher // 3:
+                log.info("online update skipped: zone teacher windows %d train / %d check",
+                         int((yz_l[tr] >= 0).sum()), int((yz_l[~tr] >= 0).sum()))
+                raise _Skip
+            keep = tr & ((ya_l >= 0) | (yz_l >= 0) | (ym_l >= 0))
+            A = self.train_anchor
+            X = np.concatenate([self.anchor_X[A], L[keep]])
+            ya = np.concatenate([self.anchor_y[0][A], ya_l[keep]])
+            yz = np.concatenate([self.anchor_y[1][A], yz_l[keep]])
+            ym = np.concatenate([self.anchor_y[2][A], ym_l[keep]])
             cand = []
             for i, n in enumerate(nets):
                 st = {k: v.clone() for k, v in n.state_dict().items()}
                 new = fit(X, ya, yz, ym, a.adapt_epochs, 100 + i, init_state=st, lr=a.lr, arch=meta.get("arch", "dil"))
                 cand.append(new.cpu().eval())
             old_s, new_s = self.scores(nets), self.scores(cand)
-            na = ensemble(cand, L)[0].argmax(1)
-            share = float(np.bincount(na, minlength=4).max() / len(na))
-            old_share = float(np.bincount(pa.argmax(1), minlength=4).max() / len(na))
+            chk = ~tr & (yz_l >= 0)
+            pz_old, pz_new = ensemble(nets, L)[1], ensemble(cand, L)[1]
+            live_old = bal(yz_l[chk], pz_old[chk].argmax(1))
+            live_new = bal(yz_l[chk], pz_new[chk].argmax(1))
+            k = len(meta["zones"])
+            h_new = np.bincount(pz_new.argmax(1), minlength=k) / len(L)
+            if self.ref is not None:
+                h_ref = np.bincount(ensemble(self.ref, L)[1].argmax(1), minlength=k) / len(L)
+            else:
+                h_ref = np.bincount(pz_old.argmax(1), minlength=k) / len(L)
+            drift = float(np.abs(h_new - h_ref).sum())
+            share, ref_share = float(h_new.max()), float(h_ref.max())
             ok = (new_s["zone"] >= old_s["zone"] - a.tol and new_s["activity"] >= old_s["activity"] - a.tol
-                  and (share < 0.97 or share <= old_share + 0.02))
+                  and live_new >= live_old - a.tol and drift <= a.max_drift
+                  and share <= max(ref_share + 0.15, 0.6))
             rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "from": meta["version"], "live_windows": int(len(L)),
-                   "pseudo_activity": int((pl_a >= 0).sum()), "pseudo_zone": int((pl_z >= 0).sum()),
-                   "old": old_s, "new": new_s, "top_class_share": round(share, 3), "accepted": bool(ok),
+                   "teacher_activity": int((ya_l[keep] >= 0).sum()), "teacher_zone": int((yz_l[keep] >= 0).sum()),
+                   "teacher_moving": int((ym_l[keep] >= 0).sum()), "old": old_s, "new": new_s,
+                   "live_teacher_zone": {"old": round(float(live_old), 3), "new": round(float(live_new), 3)},
+                   "drift_from_reference": round(drift, 3), "top_class_share": round(share, 3), "accepted": bool(ok),
                    "seconds": round(time.time() - t0)}
             if ok:
                 ver = int(time.time())
@@ -278,11 +322,13 @@ class Learner:
                 meta = {**meta, "version": ver, "online_from": rec["from"], "online_live_windows": rec["live_windows"]}
                 (self.model_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
                 np.savez_compressed(self.model_dir.parent / f"live_buffer_{ver}.npz", X=L.astype(np.float16),
-                                    t=np.array(self.buf_t), pa=pa.astype(np.float16), pz=pz.astype(np.float16))
+                                    t=np.array(self.buf_t), yz=yz_l, ym=ym_l)
                 with self.lock:
                     self.nets, self.meta = cand, meta
                 rec["to"] = ver
-                if a.push_board and meta.get("arch") == "s2":  # то же дообучение — на плату, по воздуху
+                if (a.push_board and meta.get("arch") == "s2"  # то же дообучение — на плату, по воздуху;
+                        and time.time() - self.last_push >= a.push_min * 60):  # каждая отправка = перезапуск платы
+                    self.last_push = time.time()
                     script = Path(__file__).resolve().parent.parent / "tools" / "push_board_model.sh"
                     subprocess.Popen([str(script), str(self.model_dir.resolve()), a.devices.split(",")[0]],
                                      start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -290,6 +336,8 @@ class Learner:
             with open(self.model_dir / "history.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             log.info("online update: %s", rec)
+        except _Skip:
+            pass
         except Exception:
             log.exception("online update failed")
         try:
@@ -337,10 +385,16 @@ class Learner:
         L = np.stack(rows).astype(np.float32)
         ly = tm._blank(len(L))
         ly["n_move"], ly["cmove"], ly["move"] = np.array(n_move), np.stack(cm), np.array(n_move)
-        Xa = np.concatenate([AX, L])
-        ya = {k: np.concatenate([Ay[k], ly[k]]) for k in Ay}
-        sa = np.concatenate([As, np.full(len(L), "live")])
-        val = (As == "seq") & (Ay["n_move"] >= 0)
+        seq_idx = np.flatnonzero((As == "seq") & (Ay["n_move"] >= 0))
+        hold = np.zeros(len(AX), bool)
+        hold[seq_idx[int(len(seq_idx) * 0.7):]] = True  # последние 30% размеченных записанных окон — только проверка
+        if not hold.any():
+            log.info("extras online update skipped: no labelled windows to check on")
+            return
+        Xa = np.concatenate([AX[~hold], L])
+        ya = {k: np.concatenate([Ay[k][~hold], ly[k]]) for k in Ay}
+        sa = np.concatenate([As[~hold], np.full(len(L), "live")])
+        val = hold & (Ay["n_move"] >= 0)
 
         def score(ns):
             P = tm.predict(ns, AX[val])
@@ -384,11 +438,14 @@ def main() -> None:
     ap.add_argument("--buffer", type=int, default=7200, help="live windows kept (1 per second)")
     ap.add_argument("--adapt-epochs", type=int, default=8)
     ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--conf", type=float, default=0.85)
     ap.add_argument("--tol", type=float, default=0.01)
     ap.add_argument("--extras", default="../data/ml/live_model_v4", help="train_multi.py ensemble (people, pose)")
     ap.add_argument("--devices", default="7c:4f:ad:bc:9b:54", help="boards the models were trained for")
-    ap.add_argument("--geo-conf", type=float, default=0.7, help="link-only zone certainty for a teacher label")
+    ap.add_argument("--geo-conf", type=float, default=0.8, help="link-only zone certainty for a teacher label")
+    ap.add_argument("--reference", default="../data/ml/live_model_v3", help="offline model: the drift guard compares to it")
+    ap.add_argument("--max-drift", type=float, default=0.4, help="max L1 between zone histograms (candidate vs reference)")
+    ap.add_argument("--min-teacher", type=int, default=150, help="zone teacher windows needed for an update")
+    ap.add_argument("--push-min", type=float, default=120.0, help="at most one model push to the board per this many minutes")
     ap.add_argument("--no-push-board", dest="push_board", action="store_false",
                     help="do not send accepted online updates to the board (tools/push_board_model.sh)")
     a = ap.parse_args()
