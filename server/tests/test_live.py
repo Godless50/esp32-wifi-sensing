@@ -294,3 +294,36 @@ def test_log_lines_are_kept_per_device():
         hub.on_packet(Packet(TYPE_LOG, MAC, 9, i, log=f"line {i}"), 1.0)
     (st,) = hub.devices(now=1.0)
     assert len(st.log) == LOG_KEEP and st.log[-1].endswith(f"line {LOG_KEEP + 4}")
+
+
+async def test_backlog_after_a_network_stall_is_placed_at_capture_time():
+    """The board keeps capturing while Wi-Fi stalls and then sends its backlog in a burst. The motion window must
+    use the capture time (board clock mapped to the server), or 1 s of arrival time holds several seconds of
+    frames and a still room shows motion after every stall."""
+    from wsn.protocol import TYPE_CSI_SRC
+    hub = LiveHub(decimate_hz=1.0)
+    sub = hub.subscribe()
+    rng = np.random.default_rng(7)
+    AP = "02:00:00:00:a1:2c"
+    amp_base = rng.normal(20, 4, 256)
+    phase = rng.uniform(0, 2 * np.pi, 256)
+
+    def f(t_us):  # канал медленно «дышит» (период 20 с): за 1 с почти не меняется, за 7 с — заметно
+        slow = 1.0 + 0.3 * np.sin(2 * np.pi * t_us / 20e6 + phase)
+        iq = np.clip(np.round(amp_base * slow + rng.normal(0, 1.0, 256)), -127, 127).astype(np.int8)
+        return CsiFrame(t_us, -50, -92, 1, 0, iq.tobytes(), AP)
+
+    seq = 0
+    for i in range(3000):  # 30 с по 100 Гц, кадр приходит через 5 мс после захвата
+        seq += 1
+        hub.on_packet(Packet(TYPE_CSI_SRC, MAC, 1, seq, [f(10_000_000 + i * 10_000)], None), 100.0 + i * 0.01 + 0.005)
+    while not sub.queue.empty():
+        sub.queue.get_nowait()
+    # сеть стоит 7 с, потом за 0.7 с приходит всё накопленное (700 кадров, по 10 в пакете)
+    t0 = 100.0 + 30.0
+    for k in range(70):
+        seq += 1
+        frames = [f(10_000_000 + (3000 + 10 * k + j) * 10_000) for j in range(10)]
+        hub.on_packet(Packet(TYPE_CSI_SRC, MAC, 1, seq, frames, None), t0 + 7.0 + k * 0.01)
+    energies = [m["energy"] for m in (sub.queue.get_nowait() for _ in range(sub.queue.qsize())) if m["type"] == "motion"]
+    assert energies and max(energies) < 1.3  # покой остаётся покоем (без привязки к часам платы было ~1.6-2)

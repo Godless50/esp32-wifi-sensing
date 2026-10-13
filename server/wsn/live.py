@@ -43,6 +43,7 @@ def ltf_amplitude(data: bytes, part: Literal["lltf", "ht"]) -> np.ndarray | None
 
 
 MOTION_WINDOW_S = 1.0
+CLOCK_WINDOW_S = 30.0  # часы платы -> сервер: минимум (приход - время кадра) за это окно = задержка без очереди
 MOTION_PERIOD_S = 0.25  # 4 Гц
 MOTION_BASELINE_S = 60.0
 _NULL_AMP = 1.0  # поднесущие без сигнала (защитные, DC) не учитываются
@@ -162,6 +163,8 @@ class LiveHub:
         self._last_emit: dict[str, float] = {}
         self._subs: set[Subscription] = set()
         self._motion: dict[tuple[str, str], _Motion] = {}
+        self._clock: dict[str, deque] = {}       # очередь минимумов (приход, приход - время кадра) по плате
+        self._clock_boot: dict[str, int] = {}
         self._link_times: dict[str, dict[str, deque]] = {}
         self._link_rssi: dict[str, dict[str, int]] = {}
         self.listeners: list = []  # вызываются с каждым сообщением хаба (трекер человека)
@@ -250,11 +253,34 @@ class LiveHub:
         self._broadcast({"type": "amp", "device_id": p.device_id, "src": last.src, "t": recv_t, "rssi": last.rssi,
                          "sig_mode": last.sig_mode, "amp": [round(float(x), 1) for x in amp]})
 
-    def _motion_update(self, p: Packet, recv_t: float, primary: str) -> None:
-        for src in {f.src for f in p.frames}:
-            self._motion_link(p, recv_t, src, src == primary)
+    def _board_offset(self, p: Packet, recv_t: float) -> float | None:
+        """Server time of board clock 0 for this boot: min over CLOCK_WINDOW_S of (arrival - frame time).
 
-    def _motion_link(self, p: Packet, recv_t: float, src: str, primary: bool) -> None:
+        A packet that waited (the Wi-Fi network stalled and the board sent its backlog in a burst) arrives late,
+        so the minimum ignores it; frames are then placed at the time they were captured, not when they arrived.
+        Without this the 1 s motion window after every stall held several seconds of frames -> false motion.
+        """
+        last_us = p.frames[-1].t_us
+        if last_us <= 0:  # нет часов платы (старые записи, тесты)
+            return None
+        q = self._clock.get(p.device_id)
+        if q is None or self._clock_boot.get(p.device_id) != p.boot_id:
+            q = self._clock[p.device_id] = deque()
+            self._clock_boot[p.device_id] = p.boot_id
+        o = recv_t - last_us / 1e6
+        while q and q[-1][1] >= o:  # очередь минимумов: значения возрастают от начала к концу
+            q.pop()
+        q.append((recv_t, o))
+        while q[0][0] < recv_t - CLOCK_WINDOW_S:
+            q.popleft()
+        return q[0][1]
+
+    def _motion_update(self, p: Packet, recv_t: float, primary: str) -> None:
+        off = self._board_offset(p, recv_t)
+        for src in {f.src for f in p.frames}:
+            self._motion_link(p, recv_t, src, src == primary, off)
+
+    def _motion_link(self, p: Packet, recv_t: float, src: str, primary: bool, off: float | None = None) -> None:
         m = self._motion.get((p.device_id, src))
         if m is None:
             m = self._motion[(p.device_id, src)] = _Motion()
@@ -276,14 +302,18 @@ class LiveHub:
                 m.long.clear()
             amp = ltf_amplitude(f.data, kind)
             if amp is not None:
-                m.window.append((recv_t, amp))
-                lag = (last_us - f.t_us) / 1e6  # время самого кадра по часам платы (внутри пакета)
-                ft = recv_t - lag if 0.0 <= lag < 2.0 else recv_t
+                if off is not None:  # время захвата кадра на часах сервера
+                    ft = min(recv_t, f.t_us / 1e6 + off)
+                else:
+                    lag = (last_us - f.t_us) / 1e6  # время самого кадра по часам платы (внутри пакета)
+                    ft = recv_t - lag if 0.0 <= lag < 2.0 else recv_t
+                m.window.append((ft, amp))
                 if not m.long or ft - m.long[-1][0] >= 1 / BREATH_HZ:
                     m.long.append((ft, amp))
-        while m.window and m.window[0][0] <= recv_t - MOTION_WINDOW_S:
+        t_end = m.window[-1][0] if m.window else recv_t
+        while m.window and m.window[0][0] <= t_end - MOTION_WINDOW_S:
             m.window.popleft()
-        while m.long and m.long[0][0] <= recv_t - BREATH_WINDOW_S:
+        while m.long and m.long[0][0] <= t_end - BREATH_WINDOW_S:
             m.long.popleft()
         if recv_t - m.last_breath >= BREATH_PERIOD_S and m.long and m.long[-1][0] - m.long[0][0] >= BREATH_MIN_S:
             m.last_breath = recv_t
