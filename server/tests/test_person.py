@@ -67,20 +67,29 @@ def test_consistent_answers_move_the_person_and_one_spike_does_not():
     assert 3.0 < out[-1]["xy"][0] < 6.0
 
 
-def test_room_unknown_to_the_4_zone_model_is_reached_through_counts():
+def test_room_the_models_never_saw_moving_is_reached_through_the_links():
     plan = dict(PLAN)
     plan["rooms"] = PLAN["rooms"] + [{"name": "C", "polygon": [[6, 0], [9, 0], [9, 3], [6, 3]]}]
-    plan["objects"] = PLAN["objects"] + [{"type": "дверь", "xy": [6.0, 1.5], "size": [0.8, 0.1, 2.0]}]
+    plan["objects"] = PLAN["objects"] + [{"type": "дверь", "xy": [6.0, 1.5], "size": [0.8, 0.1, 2.0]},
+                                         {"type": "датчик", "xy": [8.7, 0.3], "mac": "aa:00:00:00:00:03"}]
+    plan["boards"] = PLAN["boards"] + [{"device_id": "d3", "xy": [8.7, 2.7]}]
     out = []
     tr = PersonTracker(publish=out.append)
     tr.set_plan(plan)
     t = 0.0
-    for k in range(120):  # модель на 2 зоны (A, B) не знает C; многоголовая говорит: движение в C
+    for k in range(60):  # шумовой пол линий
+        for dev, mac in (("d1", "aa:00:00:00:00:01"), ("d2", "aa:00:00:00:00:02"), ("d3", "aa:00:00:00:00:03")):
+            tr.on_message({"type": "motion", "device_id": dev, "src": mac, "t": t, "raw": 1.0 + 0.05 * (k % 3)})
+        t += 0.25
+    for k in range(120):  # движение только на линии внутри C; модели C не знают («там никто не двигается»)
+        tr.on_message({"type": "motion", "device_id": "d3", "src": "aa:00:00:00:00:03", "t": t, "raw": 5.0})
+        for dev, mac in (("d1", "aa:00:00:00:00:01"), ("d2", "aa:00:00:00:00:02")):
+            tr.on_message({"type": "motion", "device_id": dev, "src": mac, "t": t, "raw": 1.0})
         m = pred(t, pa=0.9 if k % 2 else 0.1, moving=0.9, source="server")
-        m["counts_probs"] = {"A": [0.9, 0.1, 0, 0], "B": [0.9, 0.1, 0, 0], "C": [0.1, 0.9, 0, 0]}
+        m["counts_probs"] = {"A": [0.5, 0.5, 0, 0], "B": [0.5, 0.5, 0, 0], "C": [1.0, 0.0, 0, 0]}
         tr.on_message(m)
         t += 0.25
-    assert out[-1]["zone"] == "C"
+    assert out[-1]["zone"] == "C" and out[-1]["geo"]["zone"] == "C"
 
 
 def test_stale_and_low_link_answers_are_ignored():

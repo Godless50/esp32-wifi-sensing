@@ -73,7 +73,7 @@ class Prediction(BaseModel):
     probs: dict[str, float] = Field(default_factory=dict)
     model: str = Field(default="", max_length=40)
     # многоголовая модель (ml/train_multi.py): сколько людей двигается, по зонам, поза одного человека
-    people_probs: list[float] | None = Field(default=None, max_length=4)
+    people_probs: list[float] | None = Field(default=None, max_length=8)  # 0..5 человек
     counts_probs: dict[str, list[float]] | None = None
     pose_probs: dict[str, float] | None = None
     arms_probs: dict[str, float] | None = None

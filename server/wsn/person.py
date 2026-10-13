@@ -60,7 +60,7 @@ LINK_EMA_S = 0.75
 LINK_ON, LINK_SPAN = 1.5, 1.5  # отношение к шумовому полу: 1.5 -> 0, 3.0 -> 1
 FRESNEL_M = 0.6
 SAME_ROOM_S = 0.3
-LINK_W = 0.5
+LINK_W = 1.0  # линии (геометрия) — главный источник для комнат, где модель не видела движения
 LINK_MAX_AGE_S = 2.0
 
 MOVE_EMA_S = 1.0
@@ -412,8 +412,10 @@ class PersonTracker:
         b = g.diffuse(b, steps)
         geo = g.diffuse(self.geo, steps)
         cp = msg.get("counts_probs")
-        if cp:  # P(в зоне двигается хотя бы один) — по всем комнатам плана
-            p_label = np.array([1.0 - float(cp[z][0]) if z in cp else 1.0 / max(len(cp), 1) for z in g.labels])
+        if cp:  # P(в зоне двигается хотя бы один) — только по зонам, где у модели были настоящие примеры движения
+            known = {z: 1.0 - float(v[0]) for z, v in cp.items() if z in probs}
+            neutral = sum(known.values()) / len(known) if known else 0.5
+            p_label = np.array([known.get(z, neutral) for z in g.labels])
         else:
             unseen = 1.0 / len(probs)
             p_label = np.array([float(probs.get(z, unseen)) for z in g.labels])
