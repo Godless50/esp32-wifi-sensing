@@ -14,3 +14,4 @@ firmware/components/wsn_proto/test/util_test
 .gradle-cache/
 ui/download/
 node_modules/
+.venv-rocm/

@@ -149,28 +149,29 @@ def _state(occ, t0, t1):
     return idx[-1]
 
 
-def script_label(occ, t0, t1) -> tuple[int, int, int]:
+def script_label(occ, t0, t1) -> tuple[int, int, int, str]:
+    """(act, zone, phase index, place) of the scripted subject; -1 / "" where unknown."""
     i = _state(occ, t0, t1)
     if i is None:
-        return -1, -1, -1
+        return -1, -1, -1, ""
     e = occ[i][1]
     note = e.get("note", "")
     subj = e.get("subject")
     if subj is not None:  # точная метка сценария со страницы /scenario
         a = SUBJECT_ACT.get(subj.get("act"), -1)
         if not e.get("script") or a < 0:
-            return -1, -1, -1
-        return a, (ZONES.index(subj["zone"]) if subj.get("zone") in ZONES else -1), i
+            return -1, -1, -1, ""
+        return a, (ZONES.index(subj["zone"]) if subj.get("zone") in ZONES else -1), i, subj.get("place", "")
     if not e.get("script") or "переход" in note:
-        return -1, -1, -1
+        return -1, -1, -1, ""
     if "лежит на диване" in note:
-        return 0, -1, i  # опорный покой: все лежат/спят
+        return 0, -1, i, "на диване"  # опорный покой: все лежат/спят
     for name, v in e["zones"].items():
         if v.get("count", 0) > 0:
             for pat, code in ACT:
                 if re.search(pat, v.get("activity", "")):
-                    return code, ZONES.index(name), i
-    return -1, -1, -1
+                    return code, ZONES.index(name), i, name  # в старом сценарии одна точка на зону
+    return -1, -1, -1, ""
 
 
 def spoken_label(occ, t0, t1) -> list[int] | None:
@@ -196,7 +197,7 @@ def main() -> None:
     a = ap.parse_args()
     data = Path(a.data)
     keys = KeyStore(data / "device_keys.json")
-    X, ACTS, ZS, PH, Y, T, S = [], [], [], [], [], [], []
+    X, ACTS, ZS, PH, PL, Y, T, S = [], [], [], [], [], [], [], []
     empty = np.zeros(len(FEATS), np.float32)
     sids = a.sessions.split(",")
     if a.sessions == "all":  # все записи с разметкой «кто где»
@@ -214,15 +215,15 @@ def main() -> None:
         for t0 in np.arange(lo, hi - WIN_S, STRIDE_S):
             t1 = t0 + WIN_S
             y = spoken_label(occ, t0, t1)
-            act, zone, ph = script_label(occ, t0, t1)  # все окна подряд (шаг 1 с): нужны для признаков «было 4 с назад»
+            act, zone, ph, place = script_label(occ, t0, t1)  # все окна подряд (шаг 1 с): нужны для признаков «было 4 с назад»
             X.append(np.stack([link_window(*csi[m], t0, t1) if m in csi else empty for m in LINKS]))
-            ACTS.append(act); ZS.append(zone); PH.append(ph)
+            ACTS.append(act); ZS.append(zone); PH.append(ph); PL.append(place)
             Y.append(y if y is not None else [-1] * (1 + 2 * len(ZONES)))
             T.append(t0 + WIN_S / 2); S.append(sid); n += 1
         hz = {m[-5:]: round(len(csi[m][0]) / (hi - lo), 1) for m in LINKS if m in csi}
         print(f"{sid}: {(hi - lo) / 60:.1f} min, windows={n}, scripted={sum(1 for s_, a_ in zip(S, ACTS) if s_ == sid and a_ >= 0)}, Hz={hz}", flush=True)
     np.savez_compressed(a.out, X=np.stack(X), act=np.array(ACTS, np.int8), zone=np.array(ZS, np.int8),
-                        phase=np.array(PH, np.int16), Y=np.array(Y, np.int8), t=np.array(T), session=np.array(S),
+                        phase=np.array(PH, np.int16), place=np.array(PL), Y=np.array(Y, np.int8), t=np.array(T), session=np.array(S),
                         links=np.array(LINKS), feats=np.array(FEATS), zones=np.array(ZONES))
     print(f"saved {a.out}: X={np.stack(X).shape}")
 

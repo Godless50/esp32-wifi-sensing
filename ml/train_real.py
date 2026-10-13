@@ -193,10 +193,51 @@ def e4_leave_one_session_out(Fa, Fz, act, zone, sess, ids, zones, rise, use):
     return res
 
 
+def e5_leave_one_place_out(Fz, Fa, act, zone, place, sess, zones, rise, use):
+    """Within a session: hold out one spot of a zone that has >= 2 spots (zone must be recognised at a new spot),
+    and for activity hold out every spot in turn (activity at a spot never seen)."""
+    res = {}
+    sel = act >= 1
+    y = np.where(act <= 1, 0, act - 1)
+    hz = nearest(rise, use, zones)
+    for s in sorted(set(sess[sel].tolist())):
+        ss = sel & (sess == s)
+        spots = sorted(set(zip(zone[ss].tolist(), place[ss].tolist())))
+        multi = [zp for zp in spots if sum(1 for z2, _ in spots if z2 == zp[0]) >= 2]
+        if not multi:
+            continue
+        r = {"spots": [f"{zones[z]}/{p}" for z, p in spots]}
+        for name, mk in models().items():
+            P = np.full(len(act), -1)
+            for z, pl in multi:
+                te = ss & (zone == z) & (place == pl)
+                P[te] = mk().fit(Fz[ss & ~te], zone[ss & ~te]).predict(Fz[te])
+            ev = ss & (P >= 0)
+            A = np.full(len(act), -1)
+            rest = (sess == s) & (act == 0)
+            blocks = np.array_split(np.flatnonzero(rest), len(spots))
+            for k, (z, pl) in enumerate(spots):  # активность: точка целиком и кусок покоя — в проверку
+                te = (ss & (zone == z) & (place == pl))
+                te[blocks[k][3:max(3, len(blocks[k]) - 3)]] = True
+                tr = (sess == s) & (act >= 0) & ~te
+                tr[blocks[k]] = False
+                A[te] = mk().fit(Fa[tr], y[tr]).predict(Fa[te])
+            ea = A >= 0
+            r[name] = {"zone_bal_acc": bal(zone[ev], P[ev]),
+                       "zone_per_spot": {f"{zones[z]}/{pl}": round(float((P[ss & (zone == z) & (place == pl)] == z).mean()), 3)
+                                         for z, pl in multi},
+                       "zone_confusion": confusion(zone[ev], P[ev], zones),
+                       "activity_bal_acc": bal(y[ea], A[ea]), "activity_confusion": confusion(y[ea], A[ea], ACT3)}
+        ev = ss & np.isin([f"{z}|{p}" for z, p in zip(zone.tolist(), place.tolist())], [f"{z}|{p}" for z, p in multi])
+        r["nearest_link_zone_bal_acc"] = bal(zone[ev], hz[ev])
+        res[s] = r
+    return res
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="/data/ml/rich_v2.npz")
-    ap.add_argument("--out", default="/data/ml/real_v2")
+    ap.add_argument("--data", default="/data/ml/rich_v3.npz")
+    ap.add_argument("--out", default="/data/ml/real_v3")
     ap.add_argument("--script-sessions", default="", help="comma list; default: every session with scripted labels")
     a = ap.parse_args()
     d = np.load(a.data)
@@ -220,9 +261,12 @@ def main() -> None:
     rep["E2_activity_leave_one_zone_out"] = {"pooled": e2_activity(Fp, act, zone), "per_link": e2_activity(Fl, act, zone)}
     te = ~sc & alive & (d["Y"][:, 0] >= 0)
     dd = {"act": act, "zone": zone, "Y": d["Y"]}
-    rep["E3_cross_session"] = e3_cross(Fp, Fz, rise, dd, use, zones, sc & alive, te)
+    if te.any():  # у старых записей может не быть новых линий
+        rep["E3_cross_session"] = e3_cross(Fp, Fz, rise, dd, use, zones, sc & alive, te)
     if len(ids) >= 2:
         rep["E4_leave_one_session_out"] = e4_leave_one_session_out(Fp, Fz, act, zone, d["session"], ids, zones, rise, use)
+    if "place" in d.files:
+        rep["E5_leave_one_spot_out"] = e5_leave_one_place_out(Fz, Fp, act, zone, d["place"], d["session"], zones, rise, use)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     y3 = np.where(act <= 1, 0, act - 1)
     mk = models()["logreg"]
