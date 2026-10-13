@@ -20,7 +20,8 @@ Online learning, every --adapt-min minutes when the buffer has enough fresh wind
     Accepted -> the old model is kept as live_model.prev, the new one goes live; rejected -> nothing changes.
   Calibration (spec v2): the guard also refuses an update that makes the probabilities less honest — ECE on the
   held-out labelled sessions may grow by at most --ece-tol per head. The posted probabilities go through a
-  per-head temperature fitted on those sessions (meta.json "temperature"); it is refitted for every accepted model.
+  per-head temperature fitted only on labelled sessions outside the model's trained_on (none -> 1.0, no correction);
+  it is refitted for every accepted model (meta.json "temperature").
   Home Assistant (optional, data/labels/ha.jsonl from tools/ha_labels.py): live windows recorded while nobody
   was home for 10 min are a teacher independent of the radio. On them "somebody moves" is a false alarm; the guard
   refuses an update that raises that rate by more than --tol (needs >= --min-ha such windows, else not checked).
@@ -224,17 +225,26 @@ class Learner:
         self.anchor_X = d["X"].astype(np.float32)
         self.anchor_y = labels(d)
         sess = d["session"]
+        self.anchor_session = sess
         self.val = np.isin(sess, VAL_SESSIONS) & (self.anchor_y[0] >= 0)
         self.train_anchor = ~np.isin(sess, VAL_SESSIONS)
         self.ref = load_model(Path(a.reference))[1] if a.reference and Path(a.reference, "meta.json").exists() else None
         self.last_push = 0.0
-        self.temp = self.meta.get("temperature") or self.fit_temps(self.nets)
+        self.temp = self.fit_temps(self.nets)  # не из meta.json: правило подбора могло измениться
         log.info("model v%s (%d nets), anchor %d windows, temperature %s", self.meta["version"], len(self.nets),
                  len(self.anchor_X), self.temp)
 
     def fit_temps(self, nets) -> dict:
-        """Per-head temperature on the held-out labelled sessions (in-sample for these sessions: logged as such)."""
-        X, (ya, yz, _) = self.anchor_X[self.val], (v[self.val] for v in self.anchor_y)
+        """Per-head temperature on labelled sessions the model was NOT trained on; none -> 1.0 (no correction).
+
+        14.10: on VAL_SESSIONS (in trained_on of the base model) the fit said "sharpen" (T 0.79 / 0.71), while on
+        sessions it never saw the same model was overconfident (T > 6, data/eval/calib-1791892839-heldout.json).
+        A temperature fitted on training data makes the answers worse, so it is not used."""
+        honest = self.val & ~np.isin(self.anchor_session, self.meta.get("trained_on", []))
+        if not honest.any():
+            log.info("temperature: no labelled session outside trained_on -> 1.0")
+            return {"activity": 1.0, "zone": 1.0}
+        X, (ya, yz, _) = self.anchor_X[honest], (v[honest] for v in self.anchor_y)
         pa, pz, _ = ensemble(nets, X)
         z = yz >= 0
         return {"activity": round(fit_temperature(pa, ya), 3), "zone": round(fit_temperature(pz[z], yz[z]), 3)}

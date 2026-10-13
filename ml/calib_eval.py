@@ -20,10 +20,16 @@ from learner import VAL_SESSIONS, ensemble, load_model
 from train_final import labels
 
 
-def heads(nets, X, ya, yz):
-    pa, pz, _ = ensemble(nets, X)
-    z = yz >= 0
-    return {"activity": (pa, ya), "zone": (pz[z], yz[z])}
+HEADS = ("activity", "zone", "moving")
+
+
+def heads(nets, X, ya, yz, ym):
+    """Per head (probabilities, labels) on the labelled windows; an empty session gives empty arrays."""
+    if len(X) == 0:
+        return {h: (np.zeros((0, 2)), np.zeros(0, int)) for h in HEADS}
+    pa, pz, pm = ensemble(nets, X)
+    a, z, m = ya >= 0, yz >= 0, ym >= 0
+    return {"activity": (pa[a], ya[a]), "zone": (pz[z], yz[z]), "moving": (pm[m], ym[m])}
 
 
 def main() -> None:
@@ -31,27 +37,39 @@ def main() -> None:
     ap.add_argument("--model", default="../data/ml/live_model_s2")
     ap.add_argument("--anchor", default="../data/ml/seq_v1.npz")
     ap.add_argument("--out", default="")
+    ap.add_argument("--sessions", default=",".join(VAL_SESSIONS),
+                    help="comma list; sessions NOT in the model's trained_on give an honest number")
     a = ap.parse_args()
     meta, nets = load_model(Path(a.model))
     d = np.load(a.anchor)
     X = d["X"].astype(np.float32)
-    ya, yz, _ = labels(d)
+    ya, yz, ym = labels(d)
     sess = d["session"]
-    out = {"model": a.model, "version": meta["version"], "sessions": list(VAL_SESSIONS), "heads": {}}
+    sessions = tuple(s for s in a.sessions.split(",") if s)
+    seen = sorted(set(sessions) & set(meta.get("trained_on", [])))
+    out = {"model": a.model, "version": meta["version"], "sessions": list(sessions),
+           "in_training_set": seen, "honest": not seen, "heads": {}}
     per = {}
-    for s in VAL_SESSIONS:
-        m = (sess == s) & (ya >= 0)
-        per[s] = heads(nets, X[m], ya[m], yz[m])
-    for h in ("activity", "zone"):
-        p_all = np.concatenate([per[s][h][0] for s in VAL_SESSIONS])
-        y_all = np.concatenate([per[s][h][1] for s in VAL_SESSIONS])
+    for s in sessions:
+        m = (sess == s) & ((ya >= 0) | (yz >= 0) | (ym >= 0))
+        per[s] = heads(nets, X[m], ya[m], yz[m], ym[m])
+    for h in HEADS:
+        parts = [per[s][h] for s in sessions if len(per[s][h][1])]
+        if not parts:
+            out["heads"][h] = {"n": 0}
+            continue
+        p_all = np.concatenate([q for q, _ in parts])
+        y_all = np.concatenate([y for _, y in parts])
         t_in = fit_temperature(p_all, y_all)
         r = {"raw": report(p_all, y_all), "temperature_in_sample": round(t_in, 3),
              "with_T_in_sample": report(apply_temperature(p_all, t_in), y_all), "cross_session": {}}
-        for fit_s, test_s in (VAL_SESSIONS, VAL_SESSIONS[::-1]):
-            t = fit_temperature(*per[fit_s][h])
+        for test_s in sessions:  # температура по остальным сессиям -> проверка на этой
+            rest = [s for s in sessions if s != test_s and len(per[s][h][1])]
             pt, yt = per[test_s][h]
-            r["cross_session"][f"fit {fit_s} -> test {test_s}"] = {
+            if not rest or not len(yt):
+                continue
+            t = fit_temperature(np.concatenate([per[s][h][0] for s in rest]), np.concatenate([per[s][h][1] for s in rest]))
+            r["cross_session"][f"fit {'+'.join(rest)} -> test {test_s}"] = {
                 "T": round(t, 3), "raw": report(pt, yt), "with_T": report(apply_temperature(pt, t), yt)}
         out["heads"][h] = r
     txt = json.dumps(out, indent=1, ensure_ascii=False)
