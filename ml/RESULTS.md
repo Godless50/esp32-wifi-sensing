@@ -42,3 +42,22 @@ Unsupervised per-link check (motion level vs the link's own baseline) on the scr
 corridor router -> da:14 x3 and corridor Tuya x4; toilet -> db:2c +60 %; fridge -> LG/kitchen Tuya x2;
 waving hands in the toilet -> only db:2c rose (+30–60 %), all other links flat. Used for the live
 "where" indicator in the 3D scene (zone of the transmitter whose link deviates most).
+
+# Physics-based synthetic (2026-10-13 05:20–05:40)
+
+Generator ml/synth_physics.py: real quiet CSI (complex I/Q, 9 links) + a reflected path Tx->body->board from the
+plan geometry, H_k = B_k + g·|B̄_k|·exp(-j2πf_k d(t)/c)·e^{jφ(t)}; activities empty / still+breathing (5–12 mm,
+8–24 /min) / fine motion (limb 5–30 cm bursts) / walking (0.5–1.3 m/s + leg swing). Per-link reflection gain
+calibrated so synthetic walking in зал/кухня matches the real walk 04:51:40–04:54:00 (within ~10 %).
+20 000 synthetic 2 s windows; models trained ONLY on synthetic, tested on 2241 real 9-link windows:
+
+| task | result on real data |
+|---|---|
+| somebody moves | bal_acc 0.791 (still 1772/1984, moving 177/257) — best so far (real-trained 0.40–0.50, B threshold 0.61) |
+| fine motion vs walking | 0.603 |
+| zone of the mover (MLP) | 0.05 — fails; synthetic self-check only 0.50 (no link covers комната; 8 amplitude features too few) |
+| zone, nearest-link heuristic | санузел 48/88; "зал" windows -> коридор/санузел, but that label spans the whole route |
+
+Breathing (ml/breathing.py, 0.1–0.5 Hz peak vs 0.7–2 Hz floor, best 5 subcarriers, 120 s windows):
+printer link (sleeping adult next to it) 15.5, 15.5, 15.0, 14.5 /min with score 50–78 in 05:06–05:10;
+no stable peak on other links.
