@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сценарий записи</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --line: #262c35; --text: #e6e9ee; --muted: #8a93a1;
+    --ok: #3fb68b; --warn: #e0a43a; --bad: #e0564f; --accent: #5aa2ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) { --bg: #f5f6f8; --panel: #ffffff; --line: #dde1e7; --text: #1b1f24; --muted: #5f6873; }
+  }
+  :root[data-theme="light"] { --bg: #f5f6f8; --panel: #ffffff; --line: #dde1e7; --text: #1b1f24; --muted: #5f6873; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  nav a { color: var(--muted); text-decoration: none; margin-right: 10px; font-size: 13px; }
+  main { max-width: 640px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  #now { text-align: center; }
+  #instr { font-size: 26px; font-weight: 650; line-height: 1.2; min-height: 1.2em; }
+  #place { color: var(--muted); margin-top: 4px; min-height: 1.4em; }
+  #timer { font-size: 64px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; margin: 8px 0 2px; }
+  #step { color: var(--muted); font-size: 13px; }
+  .bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: 10px; }
+  .bar div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .buttons { display: flex; gap: 10px; margin-top: 14px; }
+  button { flex: 1; min-height: 48px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; font-size: 16px; font-weight: 600; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  #status { font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 1.4em; overflow-wrap: anywhere; }
+  #status.bad { color: var(--bad); font-weight: 600; }
+  details summary { cursor: pointer; font-weight: 600; }
+  h2 { font-size: 14px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+  .row .name { width: 76px; flex: none; }
+  input[type="number"] { width: 58px; padding: 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  input[type="text"] { flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  label.check { display: flex; align-items: center; gap: 8px; padding: 5px 0; cursor: pointer; }
+  label.check input { width: 20px; height: 20px; flex: none; }
+  .muted { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Сценарий записи</h1>
+  <nav><a href="/">Квартира</a><a href="/device">Плата</a><a href="/capture">Съёмка</a></nav>
+</header>
+<main>
+  <section class="card" id="now">
+    <div id="instr">Готов к записи</div>
+    <div id="place">Телефон говорит, куда идти и что делать, и сам ставит метки</div>
+    <div id="timer">—</div>
+    <div id="step"></div>
+    <div class="bar"><div id="bar"></div></div>
+    <div class="buttons">
+      <button class="primary" id="start">Старт</button>
+      <button id="stop" disabled>Стоп</button>
+    </div>
+    <div id="status"></div>
+  </section>
+  <details class="card" id="settings" open>
+    <summary>Настройки <span class="muted" id="total"></span></summary>
+    <h2>Кто ещё дома и что делает (без тебя)</h2>
+    <div id="others"></div>
+    <h2>Точки</h2>
+    <div id="points"></div>
+    <h2>Что делать на каждой точке, секунд</h2>
+    <div id="acts"></div>
+    <h2>Порядок</h2>
+    <div class="row"><span>Переход между точками, с</span><input type="number" id="moveSec" min="5" max="60"></div>
+    <label class="check"><input type="checkbox" id="shuffle"> Перемешать точки</label>
+    <label class="check"><input type="checkbox" id="shuffleActs"> Перемешать действия на точке</label>
+    <label class="check"><input type="checkbox" id="rest"> В конце лечь на диван и не двигаться 60 с</label>
+    <p class="muted">Каждый запуск в другом порядке: так модель учит место, а не время. Экран не гаснет, пока идёт сценарий.</p>
+  </details>
+</main>
+<script type="module" src="/static/scenario/scenario.js"></script>
+</body>
+</html>

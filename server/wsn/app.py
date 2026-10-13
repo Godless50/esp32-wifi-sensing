@@ -33,9 +33,21 @@ class ZoneLabel(BaseModel):
     activity: str = Field(default="", max_length=40)
 
 
+SUBJECT_ACTS = ("покой", "стоит", "машет", "ходит", "мелкие", "переход")
+
+
+class SubjectLabel(BaseModel):
+    """Кого ведёт сценарий: где он и что делает (точная метка для обучения)."""
+    zone: str = Field(max_length=20)
+    act: str = Field(max_length=12)
+    place: str = Field(default="", max_length=40)
+
+
 class OccupancyLabel(BaseModel):
     zones: dict[str, ZoneLabel]
     note: str = Field(default="", max_length=200)
+    script: bool = False  # метку поставил сценарий по таймеру, а не человек по памяти
+    subject: SubjectLabel | None = None
 
 
 class StartSession(BaseModel):
@@ -134,12 +146,19 @@ def create_app(
     @app.post("/api/labels")
     def add_label(req: OccupancyLabel) -> dict:
         """Разметка «кто где»: пишется событием occupancy в активную запись с серверным временем."""
+        if req.subject is not None and req.subject.act not in SUBJECT_ACTS:
+            raise HTTPException(422, f"subject.act must be one of {SUBJECT_ACTS}")
         st = _store()
         s = st.active()
         if s is None:
             raise HTTPException(409, "no active session")
-        st.append_event({"seq": None, "t": time.monotonic(), "kind": "occupancy",
-                         "zones": {k: v.model_dump() for k, v in req.zones.items()}, "note": req.note})
+        ev = {"seq": None, "t": time.monotonic(), "kind": "occupancy",
+              "zones": {k: v.model_dump() for k, v in req.zones.items()}, "note": req.note}
+        if req.script:
+            ev["script"] = True
+        if req.subject is not None:
+            ev["subject"] = req.subject.model_dump()
+        st.append_event(ev)
         return {"session": s.id}
 
     @app.post("/api/sessions/{sid}/stop")
@@ -227,6 +246,7 @@ def create_app(
     app.get("/capture")(page("capture/index.html"))
     app.get("/capture/probe")(page("capture/probe.html"))
     app.get("/data")(page("data/index.html"))
+    app.get("/scenario")(page("scenario/index.html"))
 
     app.mount("/static", StaticFiles(directory=ui_dir), name="static")
     return app

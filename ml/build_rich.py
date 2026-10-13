@@ -11,7 +11,8 @@ Per link and window (WIN_S = 4 s, STRIDE_S = 1 s), frames of that transmitter on
   rate   frames per second; a link with < MIN_FRAMES frames in the window is all zeros
 Labels:
   every window of the session is kept (stride 1 s, labels -1 where unknown) so causal context features work;
-  scripted sessions (events with "script": true) -> act (0 rest, 1 stand, 2 wave, 3 walk), zone of the
+  scripted sessions (events with "script": true; "subject" from the /scenario page when present) ->
+  act (0 rest, 1 stand, 2 wave, 3 walk, 4 fine motion), zone of the
   active person, phase = index of the scripted event; windows crossing a label change or a transition: -1
   spoken sessions -> Y like build_multilink (moving_any, moving_<zone>, occupied_<zone>), else -1
 
@@ -35,24 +36,30 @@ from wsn.store import read_csi_bin
 WIN_S, STRIDE_S, GRID_HZ, MIN_FRAMES = 4.0, 1.0, 20.0, 12
 LINKS = ["02:00:00:00:a1:18", "98:b3:ef:02:da:28", "98:b3:ef:02:da:14", "02:00:00:00:a1:2c",
          "02:00:00:00:f6:7c", "02:00:00:00:e5:57", "d8:d6:68:b3:4c:23", "d8:d6:68:b3:7a:6f",
-         "02:00:00:00:a7:e6"]
+         "02:00:00:00:a7:e6", "02:00:00:00:b8:14"]  # последним — робот-пылесос (только 11g, L-LTF)
 FEATS = ["lvar", "lpeak", "b1", "b2", "b3", "b4", "per", "lpvar", "rate"]
 BANDS = [(0.15, 0.7), (0.7, 2.0), (2.0, 4.5), (4.5, 10.0)]
 ZONES = ["спальня", "зал", "кухня", "коридор", "санузел", "комната"]
 ACT = [("стоит", 1), ("машет", 2), ("ход|идёт|идет|встаёт", 3)]
+SUBJECT_ACT = {"покой": 0, "стоит": 1, "машет": 2, "ходит": 3, "мелкие": 4}  # метки страницы /scenario
 MOVE = re.compile(r"ход|идёт|идет|иду|транзит|встал|встаю|ушёл|ушел|пошёл|пошел|машет|вошёл|вошел", re.I)
 AMBIGUOUS = re.compile(r"ногу|скан|перезагрузк", re.I)
 REORDER = np.r_[32:64, 0:32]
 
 
-def ltf_complex(data: bytes) -> np.ndarray:
-    iq = np.frombuffer(data, dtype=np.int8, count=128, offset=128).astype(np.float32).reshape(64, 2)
+def ltf_complex(data: bytes, off: int = 128) -> np.ndarray:
+    """64 complex subcarriers: off=128 HT-LTF (кадры 11n), off=0 L-LTF."""
+    iq = np.frombuffer(data, dtype=np.int8, count=128, offset=off).astype(np.float32).reshape(64, 2)
     return (iq[:, 1] + 1j * iq[:, 0])[REORDER]  # (imag, real) в буфере ESP
 
 
 def link_csi(path: Path, keys: KeyStore) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """Complex HT-LTF per transmitter: {mac: (t[n] server-monotonic, H[n, 64])}."""
-    per = defaultdict(list)
+    """Complex LTF per transmitter: {mac: (t[n] server-monotonic, H[n, 64])}.
+
+    HT-LTF from 11n frames; a transmitter that sends (almost) only 11a/g frames (robot vacuum) gets its L-LTF.
+    The two are never mixed in one link.
+    """
+    per, legacy = defaultdict(list), defaultdict(list)
     for recv_t, buf in read_csi_bin(path):
         try:
             p = parse_packet(buf, keys.get(peek_device_id(buf)))
@@ -62,10 +69,16 @@ def link_csi(path: Path, keys: KeyStore) -> dict[str, tuple[np.ndarray, np.ndarr
             continue
         last = p.frames[-1].t_us
         for f in p.frames:
+            t = recv_t - (last - f.t_us) / 1e6
             if len(f.data) >= 256:
-                per[f.src].append((recv_t - (last - f.t_us) / 1e6, ltf_complex(f.data)))
+                per[f.src].append((t, ltf_complex(f.data, 128)))
+            elif len(f.data) >= 128:
+                legacy[f.src].append((t, ltf_complex(f.data, 0)))
     out = {}
-    for src, v in per.items():
+    for src in set(per) | set(legacy):
+        v = per[src] if len(per[src]) >= 0.2 * (len(per[src]) + len(legacy[src])) else legacy[src]
+        if not v:
+            continue
         v.sort(key=lambda x: x[0])
         out[src] = (np.array([t for t, _ in v]), np.stack([h for _, h in v]).astype(np.complex64))
     return out
@@ -142,6 +155,12 @@ def script_label(occ, t0, t1) -> tuple[int, int, int]:
         return -1, -1, -1
     e = occ[i][1]
     note = e.get("note", "")
+    subj = e.get("subject")
+    if subj is not None:  # точная метка сценария со страницы /scenario
+        a = SUBJECT_ACT.get(subj.get("act"), -1)
+        if not e.get("script") or a < 0:
+            return -1, -1, -1
+        return a, (ZONES.index(subj["zone"]) if subj.get("zone") in ZONES else -1), i
     if not e.get("script") or "переход" in note:
         return -1, -1, -1
     if "лежит на диване" in note:

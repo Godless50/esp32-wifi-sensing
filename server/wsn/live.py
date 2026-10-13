@@ -61,11 +61,16 @@ def motion_energy(amps: np.ndarray, normalize: bool = False) -> float:
     return float(a.std(axis=0).mean())
 
 
+LEGACY_AFTER_S = 10.0  # линия без HT-кадров дольше этого — считаем её по L-LTF (устройства 11g)
+
+
 class _Motion:
     def __init__(self):
         self.window: deque = deque()  # (t, amp[64])
         self.baseline: deque = deque()  # (t, raw)
         self.last_emit = -1e9
+        self.kind = "ht"  # какое поле обучения в окне: HT-LTF или L-LTF (не смешиваем)
+        self.last_ht = -1e9
 
 
 @dataclass
@@ -209,10 +214,22 @@ class LiveHub:
         if m is None:
             m = self._motion[(p.device_id, src)] = _Motion()
         for f in p.frames:
-            if f.src == src and len(f.data) >= 256:  # только HT-LTF: L-LTF и HT не смешиваем
-                amp = ltf_amplitude(f.data, "ht")
-                if amp is not None:
-                    m.window.append((recv_t, amp))
+            if f.src != src:
+                continue
+            if len(f.data) >= 256:
+                kind = "ht"
+                m.last_ht = recv_t
+            elif recv_t - m.last_ht > LEGACY_AFTER_S:
+                kind = "lltf"  # передатчик шлёт только кадры 11a/g: берём L-LTF
+            else:
+                continue  # у линии есть HT-кадры: редкие L-LTF не подмешиваем
+            if kind != m.kind:
+                m.kind = kind
+                m.window.clear()
+                m.baseline.clear()
+            amp = ltf_amplitude(f.data, kind)
+            if amp is not None:
+                m.window.append((recv_t, amp))
         while m.window and m.window[0][0] <= recv_t - MOTION_WINDOW_S:
             m.window.popleft()
         if recv_t - m.last_emit < MOTION_PERIOD_S - 1e-9 or len(m.window) < 2:

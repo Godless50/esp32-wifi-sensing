@@ -110,3 +110,23 @@ async def test_occupancy_labels(rig):
     (lab,) = [e for e in evs if e["kind"] == "occupancy"]
     assert lab["zones"]["спальня"] == {"count": 2, "activity": "сон"} and lab["note"] == "начало"
     assert isinstance(lab["t"], float)
+    assert "script" not in lab and "subject" not in lab
+
+
+async def test_scenario_labels(rig, tmp_path):
+    import json
+    store, _, _, app = rig
+    (tmp_path / "ui" / "scenario").mkdir()
+    (tmp_path / "ui" / "scenario" / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        sid = (await c.post("/api/sessions", json={"kind": "static", "device_id": DEV, "duration_s": 60})).json()["id"]
+        body = {"zones": {"кухня": {"count": 1, "activity": "машет у плиты"}}, "note": "сценарий: кухня машет",
+                "script": True, "subject": {"zone": "кухня", "act": "машет", "place": "у плиты"}}
+        assert (await c.post("/api/labels", json=body)).status_code == 200
+        bad = dict(body, subject={"zone": "кухня", "act": "танцует"})
+        assert (await c.post("/api/labels", json=bad)).status_code == 422
+        assert (await c.get("/scenario")).status_code == 200
+        await c.post(f"/api/sessions/{sid}/stop")
+    evs = [json.loads(x) for x in (store.session_dir(sid) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    (lab,) = [e for e in evs if e["kind"] == "occupancy"]
+    assert lab["script"] is True and lab["subject"] == {"zone": "кухня", "act": "машет", "place": "у плиты"}

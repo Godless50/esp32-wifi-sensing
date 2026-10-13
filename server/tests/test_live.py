@@ -183,6 +183,29 @@ async def test_multilink_motion_and_amp_per_transmitter():
     assert dev.links[LINK]["hz"] == pytest.approx(20, rel=0.2) and dev.links[AP]["hz"] == pytest.approx(100, rel=0.1)
 
 
+
+async def test_legacy_only_link_uses_lltf_and_ht_link_ignores_stray_legacy():
+    from wsn.protocol import TYPE_CSI_SRC
+    hub = LiveHub(decimate_hz=1.0)
+    sub = hub.subscribe()
+    rng = np.random.default_rng(5)
+    AP, VAC = "02:00:00:00:a1:18", "02:00:00:00:b8:14"
+
+    def f(src, n):
+        iq = np.clip(np.round(rng.normal(20, 1.0, n)), -127, 127).astype(np.int8)
+        return CsiFrame(0, -56, -92, 0 if n == 128 else 1, 0, iq.tobytes(), src)
+
+    for i in range(500):  # 5 с: AP 100 Гц HT (+ редкие кадры 11g), пылесос 20 Гц только 11g
+        frames = [f(AP, 256)] + ([f(VAC, 128)] if i % 5 == 0 else []) + ([f(AP, 128)] if i % 50 == 25 else [])
+        hub.on_packet(Packet(TYPE_CSI_SRC, MAC, 1, i, frames, None), i * 0.01)
+    msgs = []
+    while not sub.queue.empty():
+        msgs.append(sub.queue.get_nowait())
+    vac = [m for m in msgs if m["type"] == "motion" and m["src"] == VAC]
+    ap = [m for m in msgs if m["type"] == "motion" and m["src"] == AP]
+    assert len(vac) >= 15 and all(m["raw"] > 0 for m in vac)
+    assert len(ap) >= 18  # редкие L-LTF у HT-линии не сбрасывают её окно
+
 def test_motion_energy_normalize_removes_gain_jumps():
     from wsn.live import motion_energy
     base = np.linspace(10, 40, 64)
