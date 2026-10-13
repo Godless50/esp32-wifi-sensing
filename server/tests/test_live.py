@@ -206,6 +206,41 @@ async def test_legacy_only_link_uses_lltf_and_ht_link_ignores_stray_legacy():
     assert len(vac) >= 15 and all(m["raw"] > 0 for m in vac)
     assert len(ap) >= 18  # редкие L-LTF у HT-линии не сбрасывают её окно
 
+
+async def test_breathing_message_for_still_breathing_link_only():
+    from wsn.protocol import TYPE_CSI_SRC
+    hub = LiveHub(decimate_hz=1.0)
+    sub = hub.subscribe()
+    rng = np.random.default_rng(6)
+    BR, QUIET = "02:00:00:00:e5:57", "98:b3:ef:02:da:28"
+    theta = rng.uniform(0, 2 * np.pi, 64)
+
+    def f(src, t, depth):
+        a = 30 * (1 + depth * np.sin(2 * np.pi * 0.25 * t) * (np.arange(64) % 2))  # 15 вдохов/мин на половине поднесущих
+        iq = np.zeros((128, 2))
+        iq[64:, 0], iq[64:, 1] = a * np.sin(theta), a * np.cos(theta)  # HT-LTF: (imag, real)
+        iq += rng.normal(0, 0.4, iq.shape)
+        return CsiFrame(int(t * 1e6), -60, -92, 1, 0, np.clip(np.round(iq), -127, 127).astype(np.int8).tobytes(), src)
+
+    msgs = []
+    for i in range(2000):  # 100 с по 20 Гц
+        t = i * 0.05
+        hub.on_packet(Packet(TYPE_CSI_SRC, MAC, 1, i, [f(BR, t, 0.06), f(QUIET, t, 0.0)], None), t)
+        while not sub.queue.empty():  # читаем по ходу, чтобы очередь подписчика не переполнилась
+            msgs.append(sub.queue.get_nowait())
+    br = [m for m in msgs if m["type"] == "breath" and m["src"] == BR]
+    quiet = [m for m in msgs if m["type"] == "breath" and m["src"] == QUIET]
+    assert br and br[-1]["ok"] and abs(br[-1]["bpm"] - 15) <= 1.0, br
+    assert quiet and not any(m["ok"] for m in quiet), quiet
+
+
+def test_moving_mean_matches_convolution():
+    from wsn.breath import _moving_mean
+    G = np.random.default_rng(1).normal(size=(300, 3))
+    w = 61
+    ref = np.stack([np.convolve(np.pad(G[:, k], w // 2, mode="edge"), np.ones(w) / w, "valid") for k in range(3)], 1)
+    assert np.allclose(_moving_mean(G, w), ref)
+
 def test_motion_energy_normalize_removes_gain_jumps():
     from wsn.live import motion_energy
     base = np.linspace(10, 40, 64)

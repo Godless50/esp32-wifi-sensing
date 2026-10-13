@@ -179,17 +179,18 @@ function buildPlan(plan) {
     ...plan.rooms.map((r) => ({ name: r.name, poly: r.polygon }))];
   links.clear();
   const board = plan.board || [0, 0];
-  const addLink = (key, xy, h) => {
+  const addLink = (key, xy, h, name) => {
     const mat = new THREE.MeshBasicMaterial({ color: 0x3fb68b, transparent: true, opacity: 0.15 });
     const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(v3(board[0], board[1], 0.8), v3(xy[0], xy[1], h)), 8, 0.025, 8), mat);
     planGroup.add(tube);
-    links.set(key, { mat, energy: 0, seen: 0, zone: zoneOf(xy) }); // зона передатчика: движение рядом с ним
+    // зона передатчика: движение рядом с ним; breath — последнее найденное дыхание на этой линии
+    links.set(key, { mat, energy: 0, seen: 0, zone: zoneOf(xy), name, xy, h, breath: null, sprite: null });
   };
   if (plan.router) {
     marker(plan.router, 0xb36ad9, "роутер B", 1.0);
-    addLink("primary", plan.router, 1.0);
+    addLink("primary", plan.router, 1.0, "роутер B");
   }
-  for (const o of plan.objects || []) if (o.mac) addLink(o.mac.toLowerCase(), o.xy, (o.z || 0) + (o.size?.[2] || 0.3));
+  for (const o of plan.objects || []) if (o.mac) addLink(o.mac.toLowerCase(), o.xy, (o.z || 0) + (o.size?.[2] || 0.3), o.type);
   scene.add(planGroup);
   const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
   bbox = {
@@ -258,6 +259,25 @@ function onMotion(m) {
   val.textContent = `${m.energy.toFixed(2)} · ${m.energy < 1.6 ? "покой" : m.energy < 3 ? "движение" : "сильное"}`;
 }
 
+const breathEl = document.getElementById("breath");
+const BREATH_FRESH_MS = 45000;  // сервер присылает оценку раз в 15 с
+
+function dropBreath(l) {
+  if (l.sprite) { planGroup.remove(l.sprite); l.sprite = null; }
+  l.breath = null;
+}
+
+function onBreath(m) {
+  const l = links.get(m.primary ? "primary" : (m.src || "").toLowerCase());
+  if (!l) return;
+  dropBreath(l);
+  if (!m.ok) return;
+  l.breath = { bpm: m.bpm, t: performance.now() };
+  l.sprite = label(`дыхание ${Math.round(m.bpm)}/мин`, "#9ad0ff", 0.34);
+  l.sprite.position.copy(v3(l.xy[0], l.xy[1], l.h + 0.6));
+  planGroup.add(l.sprite);
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/live`);
@@ -265,6 +285,7 @@ function connect() {
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === "motion") onMotion(m);
+    else if (m.type === "breath") onBreath(m);
     else if (m.type === "phone") {
       phone.position.copy(v3(m.xy[0], m.xy[1], 1.2));
       phone.visible = true;
@@ -309,6 +330,12 @@ renderer.setAnimationLoop((t) => {
     if (e >= 1.6 && (!best || e > best[1])) best = [name, e];
   }
   where.textContent = act.size ? (best ? `· похоже: ${best[0]}` : "· тихо") : "";
+  const br = [];
+  for (const l of links.values()) {
+    if (l.breath && now - l.breath.t > BREATH_FRESH_MS) dropBreath(l);
+    if (l.breath) br.push(`${l.name} ${Math.round(l.breath.bpm)}/мин`);
+  }
+  breathEl.textContent = br.length ? `· дыхание: ${br.join(", ")}` : "";
   for (const l of links.values()) {
     const live = now - l.seen < 3000;
     const e = live ? Math.max(0, Math.min(1, (l.energy - 1) / 3)) : 0;

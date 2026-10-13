@@ -11,6 +11,7 @@ from typing import Literal
 
 import numpy as np
 
+from .breath import SCORE_OK, SPREAD_OK, amplitude_series, score_series
 from .protocol import CSI_TYPES, TYPE_TELEM, Packet, Telemetry
 
 _LTF_BYTES = 128  # 64 subcarriers x (imag, real) int8
@@ -61,6 +62,7 @@ def motion_energy(amps: np.ndarray, normalize: bool = False) -> float:
     return float(a.std(axis=0).mean())
 
 
+BREATH_WINDOW_S, BREATH_MIN_S, BREATH_PERIOD_S, BREATH_HZ = 120.0, 90.0, 15.0, 20.0
 LEGACY_AFTER_S = 10.0  # линия без HT-кадров дольше этого — считаем её по L-LTF (устройства 11g)
 
 
@@ -71,6 +73,8 @@ class _Motion:
         self.last_emit = -1e9
         self.kind = "ht"  # какое поле обучения в окне: HT-LTF или L-LTF (не смешиваем)
         self.last_ht = -1e9
+        self.long: deque = deque()  # (t кадра, amp) за BREATH_WINDOW_S, не чаще BREATH_HZ — для дыхания
+        self.last_breath = -1e9
 
 
 @dataclass
@@ -213,6 +217,7 @@ class LiveHub:
         m = self._motion.get((p.device_id, src))
         if m is None:
             m = self._motion[(p.device_id, src)] = _Motion()
+        last_us = p.frames[-1].t_us
         for f in p.frames:
             if f.src != src:
                 continue
@@ -227,11 +232,21 @@ class LiveHub:
                 m.kind = kind
                 m.window.clear()
                 m.baseline.clear()
+                m.long.clear()
             amp = ltf_amplitude(f.data, kind)
             if amp is not None:
                 m.window.append((recv_t, amp))
+                lag = (last_us - f.t_us) / 1e6  # время самого кадра по часам платы (внутри пакета)
+                ft = recv_t - lag if 0.0 <= lag < 2.0 else recv_t
+                if not m.long or ft - m.long[-1][0] >= 1 / BREATH_HZ:
+                    m.long.append((ft, amp))
         while m.window and m.window[0][0] <= recv_t - MOTION_WINDOW_S:
             m.window.popleft()
+        while m.long and m.long[0][0] <= recv_t - BREATH_WINDOW_S:
+            m.long.popleft()
+        if recv_t - m.last_breath >= BREATH_PERIOD_S and m.long and m.long[-1][0] - m.long[0][0] >= BREATH_MIN_S:
+            m.last_breath = recv_t
+            self._breath(p.device_id, src, primary, recv_t, m)
         if recv_t - m.last_emit < MOTION_PERIOD_S - 1e-9 or len(m.window) < 2:
             return
         m.last_emit = recv_t
@@ -243,6 +258,16 @@ class LiveHub:
         energy = raw / med if med > 1e-6 else 0.0
         self._broadcast({"type": "motion", "device_id": p.device_id, "src": src, "primary": primary, "t": recv_t,
                          "energy": round(energy, 3), "raw": round(raw, 3)})
+
+    def _breath(self, device_id: str, src: str, primary: bool, now: float, m: _Motion) -> None:
+        t = np.array([x for x, _ in m.long])
+        r = score_series(t, amplitude_series(np.stack([a for _, a in m.long])), t[0], t[-1] + 1e-6)
+        if r is None:
+            return
+        score, bpm, spread = r
+        self._broadcast({"type": "breath", "device_id": device_id, "src": src, "primary": primary, "t": now,
+                         "bpm": round(bpm, 1), "score": round(score, 1), "spread": round(spread, 1),
+                         "ok": bool(score > SCORE_OK and spread < SPREAD_OK)})
 
     def publish(self, msg: dict) -> None:
         """Send an arbitrary message (e.g. live phone position) to all live subscribers."""

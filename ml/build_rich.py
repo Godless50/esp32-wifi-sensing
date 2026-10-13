@@ -198,9 +198,16 @@ def main() -> None:
     keys = KeyStore(data / "device_keys.json")
     X, ACTS, ZS, PH, Y, T, S = [], [], [], [], [], [], []
     empty = np.zeros(len(FEATS), np.float32)
-    for sid in a.sessions.split(","):
+    sids = a.sessions.split(",")
+    if a.sessions == "all":  # все записи с разметкой «кто где»
+        sids = sorted(p.parent.name for p in (data / "sessions").glob("*/events.jsonl")
+                      if '"occupancy"' in p.read_text(encoding="utf-8") and (p.parent / "csi.bin").exists())
+    for sid in sids:
         sdir = data / "sessions" / sid
         csi = link_csi(sdir / "csi.bin", keys)
+        if not csi:
+            print(f"{sid}: no per-transmitter CSI (old firmware), skipped", flush=True)
+            continue
         occ = load_occupancy(sdir)
         lo, hi = min(v[0][0] for v in csi.values()), max(v[0][-1] for v in csi.values())
         n = 0

@@ -28,6 +28,8 @@
   #motion .bar { flex: 1; height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; min-width: 120px; }
   #motion .fill { height: 100%; width: 0; background: var(--ok); transition: width .2s, background-color .2s; }
   #motion .val { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); width: 112px; }
+  #where, #breath { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #breath { color: var(--accent); }
   #conn { margin-left: auto; font-size: 12px; color: var(--muted); }
   #conn.bad { color: var(--bad); font-weight: 600; }
   #view { flex: 1; position: relative; min-height: 0; }
@@ -39,7 +41,7 @@
 <body>
 <header>
   <h1>Квартира</h1>
-  <nav><a href="/device">Плата</a><a href="/capture">Съёмка</a><a href="/data">Данные</a></nav>
+  <nav><a href="/device">Плата</a><a href="/capture">Съёмка</a><a href="/scenario">Сценарий</a><a href="/data">Данные</a></nav>
   <div class="group">
     <button id="top" aria-pressed="false">Сверху</button>
     <button id="persp" aria-pressed="true">Перспектива</button>
@@ -47,7 +49,7 @@
   <label><input type="checkbox" id="traj"> траектории</label>
   <button id="reload" title="Перечитать план">Обновить план</button>
   <div id="motion" title="Движение по CSI: 1 ≈ покой за последнюю минуту">
-    <span>Движение</span><div class="bar"><div class="fill"></div></div><span class="val">—</span><span id="where" title="Зона, рядом с передатчиком которой линия связи сильнее всего отклонилась от своего фона"></span>
+    <span>Движение</span><div class="bar"><div class="fill"></div></div><span class="val">—</span><span id="where" title="Зона, рядом с передатчиком которой линия связи сильнее всего отклонилась от своего фона"></span><span id="breath" title="Медленные периодичные изменения CSI 6–30 раз в минуту у неподвижного человека рядом с линией"></span>
   </div>
   <span id="conn">подключение…</span>
 </header>

@@ -7,7 +7,7 @@ import train_real as tr
 
 d = np.load("/data/ml/rich_v2.npz")
 links, feats, zones = list(d["links"]), list(d["feats"]), list(d["zones"])
-sc = d["session"] == tr.SCRIPT
+sc = d["session"] == "20261013-053501-ee64"
 rate = d["X"][:, :, feats.index("rate")]
 use = [m for i, m in enumerate(links) if (rate[sc & (d["act"] >= 0), i] > 0).mean() > 0.9]
 Fl, Fp, rise = tr.prepare(d, use)

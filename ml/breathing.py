@@ -24,11 +24,11 @@ from pathlib import Path
 
 import numpy as np
 
+from wsn.breath import score_series
 from wsn.keys import KeyStore
 from wsn.protocol import CSI_TYPES, ProtocolError, parse_packet, peek_device_id
 from wsn.store import read_csi_bin
 
-FS = 10.0
 REORDER = np.r_[32:64, 0:32]
 NAMES = {"02:00:00:00:a1:18": "роутер B (ТВ)", "98:b3:ef:02:da:28": "узел у платы", "98:b3:ef:02:da:14": "роутер коридор",
          "02:00:00:00:a1:2c": "узел санузел", "02:00:00:00:f6:7c": "холодильник", "02:00:00:00:e5:57": "принтер (спальня)",
@@ -73,21 +73,7 @@ def breathing_score(t: np.ndarray, H: np.ndarray, t0: float, t1: float, mode: st
     m = (t >= t0) & (t < t1)
     if m.sum() < (t1 - t0) * 5:  # нужно хотя бы ~5 кадров/с
         return None
-    tt, AA = t[m], series(H[m], mode)
-    grid = np.arange(t0, t1, 1 / FS)
-    X = np.stack([np.interp(grid, tt, AA[:, k]) for k in range(AA.shape[1])], axis=1)
-    w = int(60 * FS) | 1
-    kern = np.ones(w) / w
-    trend = np.stack([np.convolve(np.pad(X[:, k], w // 2, mode="edge"), kern, "valid") for k in range(X.shape[1])], 1)
-    X = (X - trend[: len(X)]) * np.hanning(len(X))[:, None]
-    P = np.abs(np.fft.rfft(X, axis=0)) ** 2
-    f = np.fft.rfftfreq(len(X), 1 / FS)
-    br = (f >= 0.1) & (f <= 0.5)
-    ref = (f >= 0.7) & (f <= 2.0)
-    score = P[br].max(0) / (np.median(P[ref], axis=0) + 1e-12)
-    best = np.argsort(-score)[:5]
-    freqs = f[br][P[br][:, best].argmax(0)]
-    return float(np.median(score[best])), float(np.median(freqs)) * 60, float(freqs.std() * 60)
+    return score_series(t[m], series(H[m], mode), t0, t1)  # тот же расчёт, что у живого индикатора на сервере
 
 
 def main():

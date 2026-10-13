@@ -3,8 +3,9 @@
 E1 zone of the active person, leave-one-activity-out: train on two of {stand, wave, walk}, test on the third.
 E2 activity {no motion (rest+stand), wave, walk}, leave-one-zone-out: train on three points, test on the fourth;
    rest windows are split into 4 contiguous blocks, block k goes to the test fold k.
-E3 cross-session: models trained on the whole scripted session, tested on the spoken sessions
+E3 cross-session: models trained on the scripted sessions, tested on the spoken sessions
    (moving_any; zone of the mover when exactly one zone moves).
+E4 leave-one-session-out over the scripted sessions (when there are >= 2): the honest test for a new recording.
 Baselines on the same windows: nearest link (largest lvar rise over the rest baseline), motion threshold.
 Features: per link FEATS of build_rich, minus the session baseline (median over the session's quietest third
 by total lvar) - the same normalisation can run live with a running median.
@@ -24,7 +25,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-SCRIPT = "20261013-053501-ee64"
 LINK_ZONE = {"02:00:00:00:a1:18": "зал", "98:b3:ef:02:da:28": "спальня", "98:b3:ef:02:da:14": "коридор",
              "02:00:00:00:a1:2c": "санузел", "02:00:00:00:f6:7c": "кухня", "02:00:00:00:e5:57": "спальня",
              "d8:d6:68:b3:4c:23": "коридор", "d8:d6:68:b3:7a:6f": "кухня", "02:00:00:00:a7:e6": "зал",
@@ -170,36 +170,68 @@ def export_logreg(pipe, use, classes, path: Path):
                                 "coef": lr.coef_.tolist(), "intercept": lr.intercept_.tolist()}, ensure_ascii=False))
 
 
+def e4_leave_one_session_out(Fa, Fz, act, zone, sess, ids, zones, rise, use):
+    """Train on the other scripted sessions, test on the held-out one: does it transfer to a new recording?"""
+    y = np.where(act <= 1, 0, act - 1)
+    sel = np.isin(sess, ids) & (act >= 0)
+    selz = sel & (act >= 1)
+    res = {"sessions": ids}
+    for name, mk in models().items():
+        pa, pz = np.full(len(act), -1), np.full(len(act), -1)
+        for s in ids:
+            te, tr = sel & (sess == s), sel & (sess != s)
+            pa[te] = mk().fit(Fa[tr], y[tr]).predict(Fa[te])
+            tz, trz = te & (act >= 1), tr & (act >= 1)
+            if tz.any() and len(set(zone[trz].tolist())) > 1:
+                pz[tz] = mk().fit(Fz[trz], zone[trz]).predict(Fz[tz])
+        res[name] = {"activity_bal_acc": bal(y[sel], pa[sel]), "activity_confusion": confusion(y[sel], pa[sel], ACT3),
+                     "zone_bal_acc": bal(zone[selz], pz[selz]), "zone_confusion": confusion(zone[selz], pz[selz], zones),
+                     "per_session": {s: {"activity": bal(y[sel & (sess == s)], pa[sel & (sess == s)]),
+                                         "zone": bal(zone[selz & (sess == s)], pz[selz & (sess == s)])} for s in ids}}
+    hz = nearest(rise, use, zones)
+    res["nearest_link_zone_bal_acc"] = bal(zone[selz], hz[selz])
+    return res
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="/data/ml/rich_v2.npz")
     ap.add_argument("--out", default="/data/ml/real_v2")
+    ap.add_argument("--script-sessions", default="", help="comma list; default: every session with scripted labels")
     a = ap.parse_args()
     d = np.load(a.data)
     links, feats, zones = list(d["links"]), list(d["feats"]), list(d["zones"])
-    sc = d["session"] == SCRIPT
+    ids = sorted({s for s, x in zip(d["session"].tolist(), d["act"].tolist()) if x >= 0})
+    if a.script_sessions:
+        ids = [s for s in ids if s in a.script_sessions.split(",")]
+    sc = np.isin(d["session"], ids)
     rate = d["X"][:, :, feats.index("rate")]
-    use = [m for i, m in enumerate(links) if (rate[sc & (d["act"] >= 0), i] > 0).mean() > 0.9]
+    # линии, живые во всех записях со сценарием (иначе модели нечего переносить между записями)
+    use = [m for i, m in enumerate(links)
+           if all((rate[(d["session"] == s) & (d["act"] >= 0), i] > 0).mean() > 0.9 for s in ids)]
     Fl, Fp, rise = prepare(d, use)
     Fz = np.concatenate([Fl, Fp], 1)
     alive = (rate[:, [links.index(m) for m in use]] > 0).all(1)
     act, zone = np.where(alive & sc, d["act"], -1), d["zone"]
-    rep = {"links": [m[-5:] for m in use], "scripted_windows": {k: int((act == c).sum()) for k, c in
-                                                                (("покой", 0), ("стоит", 1), ("машет", 2), ("ходит", 3))}}
+    rep = {"links": [m[-5:] for m in use], "script_sessions": ids,
+           "scripted_windows": {k: int((act == c).sum()) for k, c in
+                                (("покой", 0), ("стоит", 1), ("машет", 2), ("ходит", 3), ("мелкие", 4))}}
     rep["E1_zone_leave_one_activity_out"] = e1_zone(Fz, act, zone, zones, rise, use)
     rep["E2_activity_leave_one_zone_out"] = {"pooled": e2_activity(Fp, act, zone), "per_link": e2_activity(Fl, act, zone)}
     te = ~sc & alive & (d["Y"][:, 0] >= 0)
     dd = {"act": act, "zone": zone, "Y": d["Y"]}
     rep["E3_cross_session"] = e3_cross(Fp, Fz, rise, dd, use, zones, sc & alive, te)
+    if len(ids) >= 2:
+        rep["E4_leave_one_session_out"] = e4_leave_one_session_out(Fp, Fz, act, zone, d["session"], ids, zones, rise, use)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     y3 = np.where(act <= 1, 0, act - 1)
     mk = models()["logreg"]
-    export_logreg(mk().fit(Fp[act >= 0], y3[act >= 0]), use, ACT3, out / "activity_logreg.json")
+    ac = sorted(set(y3[act >= 0].tolist()))
+    export_logreg(mk().fit(Fp[act >= 0], y3[act >= 0]), use, [ACT3[c] for c in ac], out / "activity_logreg.json")
     zc = sorted(set(zone[act >= 1].tolist()))
     export_logreg(mk().fit(Fz[act >= 1], zone[act >= 1]), use, [zones[z] for z in zc], out / "zone_logreg.json")
     (out / "report.json").write_text(json.dumps(rep, ensure_ascii=False, indent=1))
     print(json.dumps(rep, ensure_ascii=False, indent=1))
-
 
 if __name__ == "__main__":
     main()
