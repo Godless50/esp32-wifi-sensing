@@ -24,6 +24,8 @@ become "at least N people in those rooms", long still periods become "nobody mov
 anchor (scripted sessions, superposed and physics data); the update is kept only if the people count on the
 labelled real windows did not get worse.
 Only boards listed in --devices are predicted: the models were trained on the links of board 1.
+An accepted online update of the main model (arch s2) is exported to int8 and sent to the first of --devices over
+the air (tools/push_board_model.sh, log data/ml/board_push.log): the board always runs the latest fine-tune.
 
 usage: tools/learner.sh   (runs this with the ROCm venv, logs to data/ml/learner.log)
 """
@@ -37,6 +39,7 @@ import logging
 import os
 import shutil
 import socket
+import subprocess
 import threading
 import time
 import urllib.request
@@ -279,6 +282,11 @@ class Learner:
                 with self.lock:
                     self.nets, self.meta = cand, meta
                 rec["to"] = ver
+                if a.push_board and meta.get("arch") == "s2":  # то же дообучение — на плату, по воздуху
+                    script = Path(__file__).resolve().parent.parent / "tools" / "push_board_model.sh"
+                    subprocess.Popen([str(script), str(self.model_dir.resolve()), a.devices.split(",")[0]],
+                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    rec["board_push"] = "started"
             with open(self.model_dir / "history.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             log.info("online update: %s", rec)
@@ -381,6 +389,8 @@ def main() -> None:
     ap.add_argument("--extras", default="../data/ml/live_model_v4", help="train_multi.py ensemble (people, pose)")
     ap.add_argument("--devices", default="7c:4f:ad:bc:9b:54", help="boards the models were trained for")
     ap.add_argument("--geo-conf", type=float, default=0.7, help="link-only zone certainty for a teacher label")
+    ap.add_argument("--no-push-board", dest="push_board", action="store_false",
+                    help="do not send accepted online updates to the board (tools/push_board_model.sh)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     torch.set_num_threads(4)
