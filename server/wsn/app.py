@@ -417,5 +417,14 @@ def create_app(
     app.get("/people")(page("people/index.html"))
     app.get("/provision")(page("provision/index.html"))
 
+    @app.middleware("http")
+    async def no_stale_ui(request, call_next):
+        """Pages and scripts are revalidated on every load (ETag): after an update the browser never keeps old JS."""
+        resp = await call_next(request)
+        p = request.url.path
+        if p.startswith("/static/") or not p.startswith("/api/"):
+            resp.headers.setdefault("Cache-Control", "no-cache")
+        return resp
+
     app.mount("/static", StaticFiles(directory=ui_dir), name="static")
     return app

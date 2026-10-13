@@ -143,7 +143,8 @@ async def test_people_labels_with_counts_posture_and_delay(rig, tmp_path):
     (tmp_path / "ui" / "people").mkdir()
     (tmp_path / "ui" / "people" / "index.html").write_text("<!doctype html>", encoding="utf-8")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
-        assert (await c.get("/people")).status_code == 200
+        r = await c.get("/people")
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"  # после обновления — свежий интерфейс
         sid = (await c.post("/api/sessions", json={"kind": "static", "device_id": DEV, "duration_s": 60})).json()["id"]
         ok = {"zones": {"зал": {"count": 2, "moving": 1, "posture": "сидит", "arms": "согнуты", "activity": "1 ходит"}},
               "script": True}

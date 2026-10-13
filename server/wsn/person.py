@@ -48,9 +48,9 @@ MIN_LINKS_LIVE = 4
 P_FLOOR = 0.05
 # Зоны: если в ответе есть counts_probs (многоголовая модель, все комнаты плана) — свидетельство «в зоне кто-то
 # двигается» по каждой комнате. Иначе (модель на 4 зоны) комнаты, которых она не знает, получают нейтральное 1/K.
-SRC_WEIGHT = {"board": 0.6, "server": 0.6}
+SRC_WEIGHT = {"board": 0.8, "server": 0.8}
 STILL_MODEL_W = 0.4
-SPEED_MOVING, SPEED_STILL = 1.2, 0.1  # м/с: разброс веры за секунду
+SPEED_MOVING, SPEED_STILL = 1.5, 0.1  # м/с: разброс веры за секунду
 SELF_W = 0.5
 REACQUIRE_PER_S = 0.002  # доля равномерной веры: фильтр может «найти» человека заново после ошибки
 MAX_DIFFUSE_STEPS = 60
@@ -60,17 +60,18 @@ LINK_EMA_S = 0.75
 LINK_ON, LINK_SPAN = 1.5, 1.5  # отношение к шумовому полу: 1.5 -> 0, 3.0 -> 1
 FRESNEL_M = 0.6
 SAME_ROOM_S = 0.3
-LINK_W = 1.0  # линии (геометрия) — главный источник для комнат, где модель не видела движения
+LINK_W = 1.5  # линии (геометрия) — главный источник для комнат, где модель не видела движения
 LINK_MAX_AGE_S = 2.0
+QUIET_LINK = 0.3
 
 MOVE_EMA_S = 1.0
-MOVE_ON, MOVE_OFF, MOVE_ON_S, MOVE_OFF_S = 0.6, 0.35, 0.75, 3.0
-SWITCH_P, SWITCH_S = 0.55, 1.0
+MOVE_ON, MOVE_OFF, MOVE_ON_S, MOVE_OFF_S = 0.6, 0.35, 0.5, 3.0
+SWITCH_P, SWITCH_S = 0.5, 0.5  # смена зоны на экране: быстрее, но не от одного ответа
 LEAVE_S = 180.0  # неподвижность у входной двери дольше этого — человек вышел
 EXIT_NEAR_M = 1.5
 SAVE_EVERY_S = 30.0
 BREATH_FRESH_S = 60.0
-XY_EMA_S = 0.5
+XY_EMA_S = 0.2
 EMIT_PERIOD_S, HEAT_PERIOD_S, HEAT_MAX = 0.25, 1.0, 80
 COUNT_ON, COUNT_HOLD_S, EXPLAIN_S = 3.0, 2.0, 0.25
 EXTRA_EMA_S = 3.0  # сглаживание числа людей и позы от многоголовой модели
@@ -433,7 +434,8 @@ class PersonTracker:
                 s = g.sensitivity(dev, src, self._links[(dev, src)].primary)
                 if s is None:
                     continue
-                lf = lf * ((1 - act) * (1 - 0.6 * s) + act * (0.15 + 0.85 * s)) ** lw
+                # тихая линия — слабое свидетельство «не рядом» (иначе человек «уезжает» туда, где линий нет)
+                lf = lf * ((1 - act) * (1 - QUIET_LINK * s) + act * (0.15 + 0.85 * s)) ** lw
             b = b * lf
             geo = geo * lf
         rho = min(1.0, REACQUIRE_PER_S * dt)

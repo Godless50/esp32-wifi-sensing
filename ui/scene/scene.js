@@ -298,19 +298,70 @@ function onPred(m) {
 
 // ---- человек на плане (трекер сервера, сообщения "person") ----
 const PERSON_FRESH_MS = 5000;
-const personGroup = new THREE.Group();
-const bodyMat = new THREE.MeshStandardMaterial({ color: 0xff8a3d, emissive: 0xff8a3d, emissiveIntensity: 0.35, transparent: true, opacity: 0.95 });
-const body = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.2, 1.25, 20), bodyMat);
-body.position.y = 0.625;
-const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 20, 14), bodyMat);
-head.position.y = 1.45;
-const ringMat = new THREE.MeshBasicMaterial({ color: 0xff8a3d, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false });
+// фигура 1.7 м: таз -> корпус -> голова, плечи -> предплечья, бёдра -> голени; суставы — группы-шарниры
+const figMat = new THREE.MeshStandardMaterial({ color: 0xff7a2f, emissive: 0xff7a2f, emissiveIntensity: 0.45, transparent: true, opacity: 0.95 });
+function bone(len, r, up = false) {  // шарнир в начале кости, кость вниз (или вверх) по Y
+  const j = new THREE.Group();
+  const m = new THREE.Mesh(new THREE.CapsuleGeometry(r, Math.max(0.01, len - 2 * r), 6, 12), figMat);
+  m.position.y = up ? len / 2 : -len / 2;
+  j.add(m);
+  return j;
+}
+const fig = { root: new THREE.Group(), pelvis: new THREE.Group() };
+fig.torso = bone(0.55, 0.15, true);
+fig.head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 20, 14), figMat);
+fig.head.position.y = 0.72;
+fig.torso.add(fig.head);
+fig.pelvis.add(fig.torso);
+for (const [side, x] of [["L", 0.21], ["R", -0.21]]) {
+  const sh = bone(0.3, 0.05); sh.position.set(x, 0.5, 0);
+  const fa = bone(0.28, 0.045); fa.position.y = -0.3; sh.add(fa);
+  fig.torso.add(sh);
+  const th = bone(0.45, 0.07); th.position.set(x / 2, 0, 0);
+  const sn = bone(0.45, 0.06); sn.position.y = -0.45; th.add(sn);
+  fig.pelvis.add(th);
+  Object.assign(fig, { ["sh" + side]: sh, ["fa" + side]: fa, ["th" + side]: th, ["sn" + side]: sn });
+}
+fig.root.add(fig.pelvis);
+const discMat = new THREE.MeshBasicMaterial({ color: 0xff7a2f, transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide });
+const disc = new THREE.Mesh(new THREE.CircleGeometry(0.35, 40), discMat);  // пятно под ногами: видно и сверху
+disc.rotation.x = -Math.PI / 2; disc.position.y = 0.02;
+const ringMat = new THREE.MeshBasicMaterial({ color: 0xff7a2f, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false });
 const ring = new THREE.Mesh(new THREE.RingGeometry(0.92, 1.0, 48), ringMat);  // радиус = разброс оценки, м
-ring.rotation.x = -Math.PI / 2;
-ring.position.y = 0.025;
-personGroup.add(body, head, ring);
+ring.rotation.x = -Math.PI / 2; ring.position.y = 0.025;
+const personGroup = new THREE.Group();
+personGroup.add(fig.root, disc, ring);
 personGroup.visible = false;
 scene.add(personGroup);
+
+// поза: углы суставов (рад) и высота таза; плавно подтягиваются к цели
+const POSES = {
+  "стоит": { h: 0.95, lie: 0, th: [0, 0], sn: [0, 0], sh: [0.05, 0.05], fa: [-0.1, -0.1] },
+  "сидит": { h: 0.47, lie: 0, th: [-1.57, -1.57], sn: [1.57, 1.57], sh: [0.3, 0.3], fa: [-0.9, -0.9] },
+  "лежит": { h: 0.45, lie: 1, th: [0, 0], sn: [0, 0], sh: [0.05, 0.05], fa: [-0.1, -0.1] },
+};
+const cur = JSON.parse(JSON.stringify(POSES["стоит"]));
+let heading = 0;
+function applyPose(name, walking, t, dt) {
+  const tgt = JSON.parse(JSON.stringify(POSES[name] || POSES["стоит"]));
+  if (walking) {  // шаг ~1.8 Гц: бёдра и руки в противофазе
+    const ph = t * 0.0113;
+    tgt.th = [-0.45 * Math.sin(ph), 0.45 * Math.sin(ph)];
+    tgt.sn = [0.5 * Math.max(0, Math.sin(ph + 1.2)), 0.5 * Math.max(0, -Math.sin(ph + 1.2))];
+    tgt.sh = [-0.35 * Math.sin(ph), 0.35 * Math.sin(ph)];  // рука — навстречу ноге своей стороны
+  }
+  const k = walking ? 1 : Math.min(1, dt / 0.25);
+  cur.h += (tgt.h - cur.h) * k; cur.lie += (tgt.lie - cur.lie) * Math.min(1, dt / 0.25);
+  for (const key of ["th", "sn", "sh", "fa"]) for (const i of [0, 1]) cur[key][i] += (tgt[key][i] - cur[key][i]) * k;
+  fig.pelvis.position.y = cur.h;
+  fig.pelvis.rotation.x = -cur.lie * Math.PI / 2;  // лёжа корпус вдоль пола
+  fig.thL.rotation.x = cur.th[0]; fig.thR.rotation.x = cur.th[1];
+  fig.snL.rotation.x = cur.sn[0]; fig.snR.rotation.x = cur.sn[1];
+  fig.shL.rotation.x = -cur.sh[0]; fig.shR.rotation.x = -cur.sh[1];
+  fig.faL.rotation.x = cur.fa[0]; fig.faR.rotation.x = cur.fa[1];
+  fig.shL.rotation.z = 0.12; fig.shR.rotation.z = -0.12;
+  fig.root.rotation.y = heading;
+}
 let person = null, personLabel = null, personLabelText = "", personPlaced = false, lastFrame = 0;
 const personPos = new THREE.Vector3();
 const personBox = document.getElementById("personBox");
@@ -381,21 +432,28 @@ function drawPerson(now, dt) {
   const target = v3(person.xy[0], person.xy[1], 0);
   if (!personPlaced) { personPos.copy(target); personPlaced = true; }
   const d = target.clone().sub(personPos), dist = d.length();
-  const step = (dist > 3 ? 3.0 : 1.6) * dt;  // м/с: плавно идёт к новой оценке
-  if (dist > step) d.multiplyScalar(step / dist);
-  personPos.add(d);
+  // быстро к новой оценке: постоянная времени 0.2 с, без «прогулки» через всю квартиру
+  const step = Math.min(dist, Math.max(dist * Math.min(1, dt / 0.2), 1.5 * dt));
+  if (dist > 0.05) heading = Math.atan2(d.x, d.z);
+  if (dist > 1e-6) personPos.add(d.multiplyScalar(step / dist));
   personGroup.position.copy(personPos);
   personGroup.visible = true;
   const sure = Math.max(0, Math.min(1, (person.zone_p - 0.4) / 0.4));
-  const col = person.moving ? 0xff8a3d : 0x8fb3d9;
-  bodyMat.color.set(col); bodyMat.emissive.set(col); ringMat.color.set(col);
-  bodyMat.opacity = 0.45 + 0.5 * sure;
+  const col = person.moving ? 0xff7a2f : 0x6fa8ff;
+  figMat.color.set(col); figMat.emissive.set(col); ringMat.color.set(col); discMat.color.set(col);
+  figMat.opacity = 0.55 + 0.4 * sure;
+  // поза: идёт — по движению; сидит / лежит — оценка модели, только уверенная (точность в этой квартире не проверена)
+  const walking = person.moving && /ход|ид/.test(person.activity || "");
+  const modelPose = person.pose && person.pose.pose_p >= 0.55 && POSES[person.pose.pose] ? person.pose.pose : null;
+  const poseName = walking ? "стоит" : modelPose || "стоит";
+  applyPose(poseName, walking, now, dt);
   const r = Math.max(0.35, Math.min(2.0, person.spread_m || 0.5));
   ring.scale.set(r, r, 1);
   const pct = `${Math.round(100 * person.zone_p)}%`;
+  const poseTxt = !walking && modelPose && modelPose !== "стоит" ? ` · ${modelPose}?` : "";
   const text = person.moving
-    ? `${person.zone} ${pct} · ${person.activity}`
-    : `${person.zone} ${pct} · неподвижен ${fmtDur(person.still_s)}${person.breath_bpm ? ` · дыхание ${Math.round(person.breath_bpm)}/мин` : ""}`;
+    ? `${person.zone} ${pct} · ${person.activity}${poseTxt}`
+    : `${person.zone} ${pct} · неподвижен ${fmtDur(person.still_s)}${poseTxt}${person.breath_bpm ? ` · дыхание ${Math.round(person.breath_bpm)}/мин` : ""}`;
   if (text !== personLabelText) {
     if (personLabel) scene.remove(personLabel);
     personLabel = label(text, person.moving ? "#ffb07a" : "#b9d3f0", 0.34);
@@ -403,12 +461,12 @@ function drawPerson(now, dt) {
     personLabelText = text;
   }
   personLabel.visible = true;
-  personLabel.position.set(personPos.x, 2.0, personPos.z);
+  personLabel.position.set(personPos.x, cur.lie > 0.5 ? 1.1 : 2.1, personPos.z);
   const src = Object.entries(person.sources || {}).filter(([, a]) => a < 3).map(([s]) => s === "board" ? "плата" : "сервер");
   const many = person.min_people >= 2 ? ` · людей не меньше ${person.min_people} (${person.min_rooms.join(", ")})` : "";
   // оценка числа людей моделью: на проверке точность низкая — показываем только уверенную и с пометкой
   const ppl = person.people && person.people.p >= 0.6 ? ` · модель: двигается ≈ ${person.people.n} (оценка, точность низкая)` : "";
-  const ps = "";  // поза: в другой квартире на проверке — уровень случайного угадывания; без своих меток не показываем
+  const ps = modelPose && !walking ? ` · поза «${modelPose}» — оценка модели, в этой квартире не проверена` : "";
   personBox.textContent = `Человек: ${text} · ±${(person.spread_m || 0).toFixed(1)} м · по ${src.join(" + ") || "—"}, линий с движением ${person.links_active}${many}${ppl}${ps}`;
 }
 

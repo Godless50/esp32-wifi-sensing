@@ -200,6 +200,7 @@ class Learner:
         g = p.get("geo") or {}
         return {"geo_zone": g.get("zone"), "geo_p": g.get("p", 0.0), "moving": bool(p.get("moving")),
                 "min_people": int(p.get("min_people", 0)), "min_rooms": p.get("min_rooms") or [],
+                "links_active": int(p.get("links_active", 0)),
                 "status": p.get("status"), "still_s": p.get("still_s", 0)}
 
     def predict(self, dev: str, X: np.ndarray) -> None:
@@ -310,7 +311,8 @@ class Learner:
                     if r in zones6:
                         c[zones6.index(r)] = 1
                 rows.append(x); n_move.append(int(min(te["min_people"], 5))); cm.append(c)
-            elif te["moving"] and te["min_people"] <= 1 and te["geo_p"] >= a.geo_conf and te["geo_zone"] in zones6:
+            elif (te["moving"] and te["min_people"] <= 1 and te.get("links_active", 0) >= 1  # учитель — только по
+                  and te["geo_p"] >= a.geo_conf and te["geo_zone"] in zones6):         # возмущённым линиям
                 c = np.zeros(6, int); c[zones6.index(te["geo_zone"])] = 1
                 rows.append(x); n_move.append(1); cm.append(c)
             elif te["status"] == "неподвижен" and te["still_s"] >= 30:
