@@ -13,6 +13,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#include "settings.h"
 
 static const char *TAG = "model_ota";
 
@@ -21,6 +22,10 @@ static const char *TAG = "model_ota";
 #define HDR 128
 /* Бит 31 версии: это не модель, а прошивка (образ приложения ESP). Версия прошивки = wsn_fw_id() новой сборки. */
 #define FW_FLAG 0x80000000u
+/* Биты 31 и 30: настройка, а не модель и не прошивка. Сейчас одна: список дополнительных передатчиков
+ * (блоб "WSNC" | u8 n | n x MAC). Версии моделей — время unix (бит 31 = 0), id прошивок — 0x80xxxxxx (бит 30 = 0). */
+#define CFG_MASK 0xC0000000u
+#define CFG_MAX 256
 
 typedef struct {
     uint32_t version, total, offset;
@@ -76,7 +81,8 @@ static void ota_task(void *arg)
 {
     static item_t it;
     uint32_t ver = 0, total = 0, received = 0;
-    bool app = false;
+    bool app = false, cfg = false;
+    static uint8_t cfg_buf[CFG_MAX];
     esp_ota_handle_t app_h = 0;
     bool app_open = false;
     const esp_partition_t *app_part = NULL;
@@ -89,16 +95,19 @@ static void ota_task(void *arg)
                 esp_ota_abort(app_h);
                 app_open = false;
             }
-            app = (it.version & FW_FLAG) != 0;
+            cfg = (it.version & CFG_MASK) == CFG_MASK;
+            app = !cfg && (it.version & FW_FLAG) != 0;
             ver = 0;
-            if (app) {
+            if (cfg) {
+                if (it.total < 5 || it.total > CFG_MAX) { set_state(it.version, 0, WSN_OTA_ERROR, 11); continue; }
+            } else if (app) {
                 app_part = esp_ota_get_next_update_partition(NULL);
                 if (!app_part || it.total > app_part->size) { set_state(it.version, 0, WSN_OTA_ERROR, 6); continue; }
             } else {
                 if (!dst) { set_state(it.version, 0, WSN_OTA_ERROR, 1); continue; }
                 if (it.total < HDR || it.total > dst->size) { set_state(it.version, 0, WSN_OTA_ERROR, 2); continue; }
             }
-            csi_capture_pause();  /* запись во флеш при включённом прослушивании эфира роняла плату */
+            if (!cfg) csi_capture_pause();  /* запись во флеш при включённом прослушивании эфира роняла плату */
             if (app) {
                 if (esp_ota_begin(app_part, OTA_WITH_SEQUENTIAL_WRITES, &app_h) != ESP_OK) {
                     ota_fail(it.version, 0, 7);
@@ -107,11 +116,35 @@ static void ota_task(void *arg)
                 app_open = true;
             }
             ver = it.version; total = it.total; received = 0; s_erased = 0;
-            ESP_LOGI(TAG, "receiving %s v%lu, %lu bytes -> %s", app ? "firmware" : "model", (unsigned long)ver,
-                     (unsigned long)total, app ? app_part->label : dst->label);
+            ESP_LOGI(TAG, "receiving %s v%lu, %lu bytes", cfg ? "settings" : app ? "firmware" : "model",
+                     (unsigned long)ver, (unsigned long)total);
         }
         if (it.offset != received || it.total != total) continue;  /* только по порядку; пропуск сервер дошлёт */
         uint32_t end = it.offset + it.len;
+        if (cfg) {
+            if (end > total) continue;  /* total <= CFG_MAX проверено при начале загрузки */
+            memcpy(cfg_buf + it.offset, it.data, it.len);
+            received = end;
+            if (received < total) { set_state(ver, received, WSN_OTA_RECEIVING, 0); continue; }
+            uint8_t n = cfg_buf[4];
+            if (memcmp(cfg_buf, "WSNC", 4) != 0 || n > WSN_MAX_LINKS || total != 5u + 6u * n) {
+                set_state(ver, received, WSN_OTA_ERROR, 12);
+                ver = 0;
+                continue;
+            }
+            static wsn_settings_t st;
+            if (settings_load(&st) != ESP_OK) { set_state(ver, received, WSN_OTA_ERROR, 13); ver = 0; continue; }
+            st.n_links = n;
+            memset(st.links, 0, sizeof(st.links));
+            memcpy(st.links, cfg_buf + 5, 6u * n);
+            csi_capture_pause();  /* запись в NVS */
+            esp_err_t err = settings_save(&st);
+            if (err != ESP_OK) { ota_fail(ver, received, 14); ver = 0; continue; }
+            ESP_LOGI(TAG, "links set over the air: %u transmitters, restarting", n);
+            set_state(ver, received, WSN_OTA_ACTIVATING, 0);
+            vTaskDelay(pdMS_TO_TICKS(1500));
+            esp_restart();
+        }
         if (app) {
             if (esp_ota_write(app_h, it.data, it.len) != ESP_OK) {
                 esp_ota_abort(app_h);

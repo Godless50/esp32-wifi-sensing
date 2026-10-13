@@ -85,6 +85,10 @@ LOCAL_MIN_LINKS = 3
 # «кто-то здесь» = активность платы >= LOCAL_ON и выше медианы по всем платам на LOCAL_ABOVE (13.10, человек сидит
 # в туалете: попадание 0.77, ложные в пустых комнатах с платами 0.01; прежний порог по медиане линий — 0.04).
 BOARD_EMA_S, LOCAL_ON, LOCAL_ABOVE = 3.0, 0.05, 0.02
+LOCAL_ABS = 0.10  # и без сравнения с другими платами: когда люди у всех плат сразу, медиана тоже высокая
+# Комнаты без своей платы: «движение» = оценка движения x доля веры трекера выше EST_MASS0 (размазанная вера
+# не должна зажигать соседние комнаты: 13.10 дети на кухне — «зал» горел 83% времени при доле веры ~0.2).
+EST_MASS0 = 0.3
 LOCAL_W = 1.0  # то же как свидетельство о месте для трекера: клетки этой комнаты x2 за секунду
 EXTRA_EMA_S = 3.0  # сглаживание числа людей и позы от многоголовой модели
 EXTRA_FRESH_S = 5.0
@@ -149,6 +153,8 @@ class Grid:
         self.router = np.array(plan["router"], float) if plan.get("router") else None
         boards = {str(b["device_id"]).lower(): np.array(b["xy"], float) for b in plan.get("boards") or []}
         self.boards = boards
+        for dev, xy in boards.items():  # наши платы — тоже передатчики (пинги роутеру 100 Гц): линии плата -> плата
+            self.tx.setdefault(dev, xy)
         # модели (зоны, люди) обучены на линиях первой платы плана: ответы других плат о зонах не принимаем,
         # их линии идут только в геометрию
         self.model_board = str(plan["boards"][0]["device_id"]).lower() if plan.get("boards") else None
@@ -408,7 +414,7 @@ class PersonTracker:
         out: dict[str, tuple[float, bool]] = {}
         for dev, v in fresh.items():
             lab = g.labels[g.label_idx[int(np.argmin(np.hypot(*(g.xy - g.boards[dev]).T)))]]
-            here = v >= LOCAL_ON and (len(fresh) < 2 or v - med >= LOCAL_ABOVE)
+            here = v >= LOCAL_ABS or (v >= LOCAL_ON and (len(fresh) < 2 or v - med >= LOCAL_ABOVE))
             pv, ph = out.get(lab, (0.0, False))
             out[lab] = (max(pv, v), ph or here)
         return out
@@ -671,7 +677,8 @@ class PersonTracker:
                     breath[lab] = bpm
         rooms = []
         for i, lab in enumerate(g.labels):
-            est = float(self._score) * float(mass[i]) if self.moving else 0.0
+            share = max(0.0, (float(mass[i]) - EST_MASS0) / (1.0 - EST_MASS0))
+            est = float(self._score) * share if self.moving else 0.0
             m = max(local.get(lab, 0.0), est)
             if m >= ROOM_MOTION_ON:
                 self._room_last_motion[lab] = now

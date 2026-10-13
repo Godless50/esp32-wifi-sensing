@@ -7,7 +7,8 @@
 #define WSN_FW_VER 2
 /* Номер сборки для телеметрии (поле fw_ver) и обновления по воздуху: бит 31 + первые 3 байта SHA256 ELF. */
 uint32_t wsn_fw_id(void);
-#define WSN_MAX_LINKS 8
+/* Дополнительные передатчики: узлы mesh, устройства квартиры и другие наши платы (их пинги роутеру — 100 Гц). */
+#define WSN_MAX_LINKS 14
 
 typedef struct {
     char ssid[33];

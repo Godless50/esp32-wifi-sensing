@@ -89,3 +89,24 @@ def test_model_version_with_the_firmware_bit_is_refused():
             p.start(DEV, blob(version=0x80000001))
 
     asyncio.run(go())
+
+
+def test_settings_blob_and_push_done_when_the_board_activates():
+    from wsn.model_push import CFG_MASK, links_blob
+    from wsn.protocol import TYPE_MODEL_ACK, ModelAck
+    b = links_blob(["02:00:00:00:a1:3c", "02:00:00:00:c9:04"])
+    assert b[:5] == b"WSNC\x02" and len(b) == 17
+    with pytest.raises(ValueError):
+        links_blob(["00:00:00:00:00:01"] * 15)
+
+    async def go():
+        p = ModelPusher({DEV: bytes(32)}, FakeIngest())
+        p.transport = FakeTransport()
+        st = p.start(DEV, b)
+        assert st.kind == "settings" and st.version & CFG_MASK == CFG_MASK
+        await asyncio.sleep(0.2)
+        p.on_packet(Packet(TYPE_MODEL_ACK, DEV, 7, 2, [], model_ack=ModelAck(st.version, len(b), 2, 0, 0)), 0.0)
+        await asyncio.sleep(0.8)
+        assert st.state == "done"
+
+    asyncio.run(go())

@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/ringbuf.h"
+#include "settings.h"
 
 static const char *TAG = "csi";
 
@@ -19,12 +20,12 @@ typedef struct __attribute__((packed)) {
 } item_hdr_t;
 
 #define RING_BYTES (160 * 1024) /* ~4 s at 100 Hz x 400 B */
-#define RING_BYTES_INTERNAL (40 * 1024)
+#define RING_BYTES_INTERNAL (48 * 1024)
 
 static RingbufHandle_t s_ring;
 static uint8_t s_bssid[6];
 static uint8_t s_source;
-#define MAX_TX (1 + 8)
+#define MAX_TX (1 + WSN_MAX_LINKS)
 static uint8_t s_tx[MAX_TX][6]; /* [0] = точка доступа платы, дальше — дополнительные передатчики */
 static size_t s_tx_n;
 static int64_t s_tx_last[MAX_TX];

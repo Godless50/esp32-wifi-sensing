@@ -8,6 +8,8 @@ resumes from that point, so lost datagrams are simply sent again. Done when the 
 The same channel carries a firmware image (ESP app .bin): its version has bit 31 set and equals the board's
 firmware id (bit 31 + the first 3 bytes of the image's ELF SHA256, telemetry field fw_ver). The board writes it into
 the other OTA app partition, checks it, boots it and confirms it only after reaching Wi-Fi (else it rolls back).
+And a settings blob ("WSNC" | u8 n | n x MAC: the extra transmitters whose CSI the board forwards): version with
+bits 31 and 30 set; the board stores it in NVS and restarts (done when it reports "activating").
 """
 
 from __future__ import annotations
@@ -26,6 +28,20 @@ ACK_WAIT_S = 0.6
 TIMEOUT_S = 180.0
 FW_TIMEOUT_S = 900.0
 FW_FLAG = 0x80000000
+CFG_MASK = 0xC0000000
+
+
+def links_blob(macs: list[str]) -> bytes:
+    """Settings blob for the board: extra transmitters (at most 14)."""
+    if len(macs) > 14:
+        raise ValueError("at most 14 extra transmitters")
+    out = bytearray(b"WSNC") + bytes([len(macs)])
+    for m in macs:
+        b = bytes.fromhex(m.replace(":", ""))
+        if len(b) != 6:
+            raise ValueError(f"bad MAC {m}")
+        out += b
+    return bytes(out)
 APP_DESC_MAGIC = b"\x32\x54\xcd\xab"  # esp_app_desc_t, сразу после заголовков образа (смещение 0x20)
 
 
@@ -77,16 +93,24 @@ class ModelPusher:
 
     def start(self, device_id: str, blob: bytes) -> PushState:
         fw = firmware_id(blob)
-        if fw is None and (blob[:4] != b"WSNM" or len(blob) < 128):
-            raise ValueError("neither a model blob nor a firmware image")
+        cfg = blob[:4] == b"WSNC"
+        if cfg and (len(blob) < 5 or len(blob) != 5 + 6 * blob[4]):
+            raise ValueError("bad settings blob")
+        if fw is None and not cfg and (blob[:4] != b"WSNM" or len(blob) < 128):
+            raise ValueError("neither a model blob, a firmware image nor a settings blob")
         cur = self.pushes.get(device_id)
         if cur and cur.state in ("starting", "sending", "activating"):
             raise RuntimeError("push already running")
         loop = asyncio.get_running_loop()  # вызывать из цикла событий сервера (иначе RuntimeError до записи состояния)
-        ver = fw if fw is not None else struct.unpack_from("<I", blob, 4)[0]
-        if fw is None and ver & FW_FLAG:
-            raise ValueError("model version must not have bit 31 set")
-        st = PushState(device_id, ver, len(blob), kind="firmware" if fw is not None else "model")
+        if cfg:
+            ver, kind = CFG_MASK | (int(time.time()) & 0x3FFFFFFF), "settings"
+        elif fw is not None:
+            ver, kind = fw, "firmware"
+        else:
+            ver, kind = struct.unpack_from("<I", blob, 4)[0], "model"
+            if ver & FW_FLAG:
+                raise ValueError("model version must not have bit 31 set")
+        st = PushState(device_id, ver, len(blob), kind=kind)
         self.pushes[device_id] = st
         loop.create_task(self._run(st, blob))
         return st
@@ -106,6 +130,9 @@ class ModelPusher:
                 ack = self.acks.get(dev, (None, 0))[0]
                 if ack is not None and ack.version == st.version:
                     st.acked = ack.received
+                    if ack.state == 2 and st.kind == "settings":
+                        st.state, st.message = "done", "board stored the settings and restarts"
+                        return
                     if ack.state == 2:
                         st.state, st.message = "activating", f"board verified the {st.kind} and restarts"
                     elif ack.state == 3:

@@ -171,7 +171,7 @@ static int cmd_links(int argc, char **argv)
         puts("ERR usage: links set <mac>[,<mac>...] | links clear");
         return 1;
     }
-    char buf[WSN_MAX_LINKS * 18 + 1];
+    char buf[WSN_MAX_LINKS * 18 + 1];  /* argv[2] длиннее — strlcpy обрежет, лишние MAC отвергнутся */
     strlcpy(buf, argv[2], sizeof(buf));
     s_new_n = 0;
     for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
