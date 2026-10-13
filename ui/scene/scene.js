@@ -27,7 +27,10 @@ scene.add(sun);
 let planGroup = new THREE.Group(), trajGroup = new THREE.Group();
 scene.add(planGroup, trajGroup);
 let bbox = { cx: 0, cy: 0, size: 8 };
-const links = new Map(); // "primary" | MAC передатчика -> {mat, energy, seen}
+const links = new Map(); // "primary" | MAC передатчика -> {mat, energy, seen, zone}
+const floors = new Map(); // комната/зона -> материал пола (подсветка «где движение»)
+let zoneShapes = []; // [{name, poly}] — сначала зоны без стен (кухня), потом комнаты
+const zoneOf = (xy) => (zoneShapes.find((z) => inside(xy, z.poly)) || {}).name || null;
 
 function applyTheme() {
   scene.background = new THREE.Color(css("--bg") || "#0f1216");
@@ -118,6 +121,7 @@ function buildPlan(plan) {
       new THREE.MeshStandardMaterial({ color: ROOM_COLORS[i % ROOM_COLORS.length], transparent: true, opacity: 0.35, side: THREE.DoubleSide }));
     floor.rotation.x = -Math.PI / 2;
     planGroup.add(floor);
+    floors.set(r.name, floor.material);
     for (let k = 0; k < poly.length; k++) {
       const a = poly[k], b = poly[(k + 1) % poly.length];
       const id = [key(a), key(b)].sort().join("|");
@@ -138,6 +142,7 @@ function buildPlan(plan) {
     patch.rotation.x = -Math.PI / 2;
     patch.position.y = 0.01;
     planGroup.add(patch);
+    floors.set(z.name, patch.material);
     const outline = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(z.polygon.map(([x, y]) => v3(x, y, 0.02))),
       new THREE.LineDashedMaterial({ color: 0x9a8a6a, dashSize: 0.15, gapSize: 0.1 }));
     outline.computeLineDistances();
@@ -170,13 +175,15 @@ function buildPlan(plan) {
   };
   marker(plan.board || [0, 0], 0xe0564f, "плата", 0.8);
   // линии связи «передатчик → плата»: каждая подсвечивается движением на своём канале
+  zoneShapes = [...(plan.zones || []).map((z) => ({ name: z.name, poly: z.polygon })),
+    ...plan.rooms.map((r) => ({ name: r.name, poly: r.polygon }))];
   links.clear();
   const board = plan.board || [0, 0];
   const addLink = (key, xy, h) => {
     const mat = new THREE.MeshBasicMaterial({ color: 0x3fb68b, transparent: true, opacity: 0.15 });
     const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(v3(board[0], board[1], 0.8), v3(xy[0], xy[1], h)), 8, 0.025, 8), mat);
     planGroup.add(tube);
-    links.set(key, { mat, energy: 0, seen: 0 });
+    links.set(key, { mat, energy: 0, seen: 0, zone: zoneOf(xy) }); // зона передатчика: движение рядом с ним
   };
   if (plan.router) {
     marker(plan.router, 0xb36ad9, "роутер B", 1.0);
@@ -237,6 +244,7 @@ scene.add(phone);
 let phoneSeen = 0, motionSeen = 0, energy = 0;
 const fill = document.querySelector("#motion .fill"), val = document.querySelector("#motion .val");
 const conn = document.getElementById("conn");
+const where = document.getElementById("where");
 
 function onMotion(m) {
   const l = links.get(m.primary ? "primary" : (m.src || "").toLowerCase());
@@ -287,6 +295,20 @@ renderer.setAnimationLoop((t) => {
   const now = performance.now();
   if (phone.visible && now - phoneSeen > 3000) phone.visible = false;
   if (now - motionSeen > 3000 && motionSeen) { val.textContent = "нет данных"; fill.style.width = "0%"; motionSeen = 0; }
+  // «где движение»: для каждой зоны — максимум по линиям её передатчиков (энергия относительно своего фона)
+  const act = new Map();
+  for (const l of links.values()) {
+    if (!l.zone || now - l.seen > 3000) continue;
+    act.set(l.zone, Math.max(act.get(l.zone) || 0, l.energy));
+  }
+  let best = null;
+  for (const [name, mat] of floors) {
+    const e = act.get(name) || 0;
+    const k = Math.max(0, Math.min(1, (e - 1.4) / 2.0));
+    mat.emissive?.setRGB(0.9 * k, 0.45 * k, 0.1 * k);
+    if (e >= 1.6 && (!best || e > best[1])) best = [name, e];
+  }
+  where.textContent = act.size ? (best ? `· похоже: ${best[0]}` : "· тихо") : "";
   for (const l of links.values()) {
     const live = now - l.seen < 3000;
     const e = live ? Math.max(0, Math.min(1, (l.energy - 1) / 3)) : 0;

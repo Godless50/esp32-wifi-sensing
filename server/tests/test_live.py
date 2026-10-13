@@ -181,3 +181,12 @@ async def test_multilink_motion_and_amp_per_transmitter():
     assert {m["src"] for m in msgs if m["type"] == "amp"} == {AP}  # водопад — только основной канал
     (dev,) = hub.devices(now=5.0)
     assert dev.links[LINK]["hz"] == pytest.approx(20, rel=0.2) and dev.links[AP]["hz"] == pytest.approx(100, rel=0.1)
+
+
+def test_motion_energy_normalize_removes_gain_jumps():
+    from wsn.live import motion_energy
+    base = np.linspace(10, 40, 64)
+    gains = np.repeat([1.0, 1.6, 0.7, 1.3], 25)[:, None]  # скачки АРУ/мощности без изменения канала
+    a = base[None] * gains
+    assert motion_energy(a) > 1.0
+    assert motion_energy(a, normalize=True) < 1e-3

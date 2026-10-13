@@ -43,15 +43,22 @@ MOTION_BASELINE_S = 60.0
 _NULL_AMP = 1.0  # поднесущие без сигнала (защитные, DC) не учитываются
 
 
-def motion_energy(amps: np.ndarray) -> float:
-    """Mean over live subcarriers of the temporal std of amplitude. amps: [T, 64]."""
+def motion_energy(amps: np.ndarray, normalize: bool = False) -> float:
+    """Mean over live subcarriers of the temporal std of amplitude. amps: [T, 64].
+
+    normalize=True divides every frame by its mean amplitude first (removes AGC / transmit-power jumps,
+    which are large for IoT transmitters), so only the shape of the channel counts.
+    """
     a = np.asarray(amps, dtype=np.float32)
     if a.ndim != 2 or a.shape[0] < 2:
         return 0.0
     live = a.mean(axis=0) > _NULL_AMP
     if not live.any():
         return 0.0
-    return float(a[:, live].std(axis=0).mean())
+    a = a[:, live]
+    if normalize:
+        a = a / (a.mean(axis=1, keepdims=True) + 1e-3)
+    return float(a.std(axis=0).mean())
 
 
 class _Motion:
@@ -211,7 +218,7 @@ class LiveHub:
         if recv_t - m.last_emit < MOTION_PERIOD_S - 1e-9 or len(m.window) < 2:
             return
         m.last_emit = recv_t
-        raw = motion_energy(np.stack([a for _, a in m.window]))
+        raw = motion_energy(np.stack([a for _, a in m.window]), normalize=True)
         m.baseline.append((recv_t, raw))
         while m.baseline and m.baseline[0][0] <= recv_t - MOTION_BASELINE_S:
             m.baseline.popleft()
