@@ -48,7 +48,7 @@ def main() -> None:
     for s in range(a.seeds):
         net = fit(X, ya, yz, ym, a.epochs, s, init_enc=enc)
         torch.save({k: v.cpu() for k, v in net.state_dict().items()}, out / f"net{s}.pt")
-    meta = {"version": int(time.time()), "arch": ARCH, "links": list(LINKS), "zones": ZONES4, "activities": ACT_NAMES,
+    meta = {"version": int(time.time()), "arch": ARCH, "links": [str(m) for m in d["links"]] if "links" in d.files else list(LINKS), "zones": ZONES4, "activities": ACT_NAMES,
             "seeds": a.seeds, "epochs": a.epochs, "trained_on": sorted(set(d["session"].tolist())),
             "encoder": a.encoder, "params": sum(p.numel() for p in net.parameters()), "seconds": round(time.time() - t0)}
     (out / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))

@@ -63,7 +63,10 @@ def main() -> None:
     ap.add_argument("--data", default="/data")
     ap.add_argument("--sessions", default="20261013-053501-ee64,20261013-065019-45cd")
     ap.add_argument("--out", default="/data/ml/seq_v1.npz")
+    ap.add_argument("--links", default=",".join(LINKS),
+                    help="transmitter MACs in model input order (default: build_rich.LINKS, the 13.10 set)")
     a = ap.parse_args()
+    links = [m.strip().lower() for m in a.links.split(",") if m.strip()]
     data = Path(a.data)
     keys = KeyStore(data / "device_keys.json")
     X, ACT, Z, PL, S, T, MV = [], [], [], [], [], [], []
@@ -78,12 +81,12 @@ def main() -> None:
             y = spoken_label(occ, t0, t0 + WIN_S)
             if act < 0 and y is None:
                 continue
-            X.append(np.stack([link_seq(*csi[m], t0) if m in csi else np.zeros((NT, NC), np.float32) for m in LINKS]))
+            X.append(np.stack([link_seq(*csi[m], t0) if m in csi else np.zeros((NT, NC), np.float32) for m in links]))
             ACT.append(act); Z.append(zone); PL.append(place); S.append(sid); T.append(t0); MV.append(y[0] if y else -1)
             n += 1
         print(f"{sid}: windows={n}", flush=True)
     np.savez_compressed(a.out, X=np.stack(X), act=np.array(ACT, np.int8), zone=np.array(Z, np.int8), place=np.array(PL),
-                        session=np.array(S), t=np.array(T), moving=np.array(MV, np.int8), links=np.array(LINKS))
+                        session=np.array(S), t=np.array(T), moving=np.array(MV, np.int8), links=np.array(links))
     print("saved", a.out, np.stack(X).shape)
 
 
