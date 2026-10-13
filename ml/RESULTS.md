@@ -97,3 +97,8 @@ Caveats: one scripted session; the three activities of a point are contiguous in
 period rather than the place, and E3 shows zone does not transfer across sessions yet.
 Next: a transmitter in the bathroom and one in the зал off the board->kitchen line; repeated scripted runs with
 labels posted by the phone at every step; then leave-one-session-out.
+
+Breathing, amplitude vs adjacent-subcarrier phase (ml/breathing.py --mode both): the score's noise floor is 10–14
+(max over 0.1–0.5 Hz of the 5 best of ~52 series), so the marker threshold is now 25. Only the printer link (sleeping
+adult next to it) is above it: amplitude 55–74 / phase 40–75, 15.0–16.0 /min, in 05:05–05:10 and again at 05:43 (80 s
+window). Phase confirms amplitude but finds no new source; the two people lying on the sofa are not visible on any link.

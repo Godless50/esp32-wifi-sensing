@@ -7,7 +7,11 @@ amplitude-only single antenna has blind spots, so we pick the best subcarriers p
   in 0.7–2.0 Hz. Report the dominant breathing frequency of the 5 best subcarriers and the score.
 A real breathing source shows the same frequency in consecutive windows; noise jumps around.
 
+--mode phase runs the same scoring on the phase of adjacent-subcarrier products H_k·conj(H_k+1) with the
+per-frame mean removed (CSCR-like: the common phase offset and the timing slope cancel), --mode both prints both.
+
 usage: python breathing.py --session /data/sessions/<id> [--win 120] [--step 60] [--from HH:MM:SS --to HH:MM:SS]
+       [--mode amp|phase|both]
 """
 
 from __future__ import annotations
@@ -21,11 +25,11 @@ from pathlib import Path
 import numpy as np
 
 from wsn.keys import KeyStore
-from wsn.live import ltf_amplitude
 from wsn.protocol import CSI_TYPES, ProtocolError, parse_packet, peek_device_id
 from wsn.store import read_csi_bin
 
 FS = 10.0
+REORDER = np.r_[32:64, 0:32]
 NAMES = {"02:00:00:00:a1:18": "роутер B (ТВ)", "98:b3:ef:02:da:28": "узел у платы", "98:b3:ef:02:da:14": "роутер коридор",
          "02:00:00:00:a1:2c": "узел санузел", "02:00:00:00:f6:7c": "холодильник", "02:00:00:00:e5:57": "принтер (спальня)",
          "d8:d6:68:b3:4c:23": "Tuya коридор", "d8:d6:68:b3:7a:6f": "Tuya кухня", "02:00:00:00:a7:e6": "iComm"}
@@ -43,19 +47,33 @@ def load(sdir: Path, keys: KeyStore):
         last = p.frames[-1].t_us
         for f in p.frames:
             if len(f.data) >= 256:
-                a = ltf_amplitude(f.data, "ht")
-                if a is not None:
-                    per[f.src].append((recv_t - (last - f.t_us) / 1e6, a))
-    return {s: (np.array([t for t, _ in v]), np.stack([a for _, a in v])) for s, v in per.items() if len(v) > 100}
+                iq = np.frombuffer(f.data, dtype=np.int8, count=128, offset=128).astype(np.float32).reshape(64, 2)
+                per[f.src].append((recv_t - (last - f.t_us) / 1e6, (iq[:, 1] + 1j * iq[:, 0])[REORDER]))
+    return {s: (np.array([t for t, _ in v]), np.stack([a for _, a in v]).astype(np.complex64))
+            for s, v in per.items() if len(v) > 100}
 
 
-def breathing_score(t: np.ndarray, A: np.ndarray, t0: float, t1: float):
+def series(H: np.ndarray, mode: str) -> np.ndarray:
+    """Per-frame values [T, S] to look for breathing in: AGC-normalised amplitude or adjacent-pair phase."""
+    A = np.abs(H)
+    live = A.mean(0) > 2
+    if mode == "amp":
+        return A[:, live] / (A[:, live].mean(1, keepdims=True) + 1e-3)
+    idx = np.flatnonzero(live)
+    pairs = idx[:-1][np.diff(idx) == 1]
+    D = H[:, pairs] * np.conj(H[:, pairs + 1])
+    D = D / (np.abs(D) + 1e-6)
+    c = D.mean(1, keepdims=True)
+    D = D * np.conj(c / (np.abs(c) + 1e-6))  # общий для кадра сдвиг и наклон фазы
+    ref = D.mean(0)
+    return np.angle(D * np.conj(ref / (np.abs(ref) + 1e-6)))  # отклонение от среднего за окно, рад
+
+
+def breathing_score(t: np.ndarray, H: np.ndarray, t0: float, t1: float, mode: str = "amp"):
     m = (t >= t0) & (t < t1)
     if m.sum() < (t1 - t0) * 5:  # нужно хотя бы ~5 кадров/с
         return None
-    tt, AA = t[m], A[m]
-    live = AA.mean(0) > 2
-    AA = AA[:, live] / (AA[:, live].mean(1, keepdims=True) + 1e-3)
+    tt, AA = t[m], series(H[m], mode)
     grid = np.arange(t0, t1, 1 / FS)
     X = np.stack([np.interp(grid, tt, AA[:, k]) for k in range(AA.shape[1])], axis=1)
     w = int(60 * FS) | 1
@@ -80,7 +98,9 @@ def main():
     ap.add_argument("--step", type=float, default=60)
     ap.add_argument("--from_", "--from", dest="frm")
     ap.add_argument("--to")
+    ap.add_argument("--mode", choices=["amp", "phase", "both"], default="amp")
     a = ap.parse_args()
+    modes = ["amp", "phase"] if a.mode == "both" else [a.mode]
     sdir = Path(a.session)
     meta = json.loads((sdir / "meta.json").read_text())
     links = load(sdir, KeyStore(Path(a.data) / "device_keys.json"))
@@ -91,12 +111,13 @@ def main():
         wall = meta["started_wall"] + (t0 - meta["started"])
         print(f"--- {time.strftime('%H:%M:%S', time.localtime(wall))} + {a.win:.0f} s")
         for src in sorted(links, key=lambda s: NAMES.get(s, s)):
-            r = breathing_score(*links[src], t0, t0 + a.win)
-            if r is None:
-                continue
-            sc, bpm, spread = r
-            mark = "  <== дыхание?" if sc > 8 and spread < 3 else ""
-            print(f"  {NAMES.get(src, src):20s} score={sc:6.1f}  частота={bpm:5.1f}/мин (разброс {spread:4.1f}){mark}")
+            for mode in modes:
+                r = breathing_score(*links[src], t0, t0 + a.win, mode)
+                if r is None:
+                    continue
+                sc, bpm, spread = r
+                mark = "  <== дыхание" if sc > 25 and spread < 2 else ""  # шумовой фон этой оценки ~10–14
+                print(f"  {NAMES.get(src, src):20s} {mode:5s} score={sc:6.1f}  частота={bpm:5.1f}/мин (разброс {spread:4.1f}){mark}")
 
 
 if __name__ == "__main__":
