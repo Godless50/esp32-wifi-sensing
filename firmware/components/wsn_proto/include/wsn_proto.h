@@ -21,6 +21,11 @@ extern "C" {
 #define WSN_TYPE_PRED 2
 #define WSN_TYPE_TELEM 3
 #define WSN_TYPE_CSI_SRC 4 /* CSI frames tagged with transmitter MAC (multi-link) */
+#define WSN_TYPE_MODEL_CHUNK 6 /* server -> board: piece of a new model blob */
+#define WSN_TYPE_MODEL_ACK 7   /* board -> server: how much of it is stored */
+#define WSN_MODEL_CHUNK_HDR 14 /* version u32, total u32, offset u32, len u16 */
+#define WSN_MODEL_CHUNK_MAX 1024
+#define WSN_MODEL_ACK_LEN 11   /* version u32, received u32, state u8, slot u8, error u8 */
 
 typedef void (*wsn_hmac_fn)(const uint8_t *key, size_t key_len, const uint8_t *msg, size_t len,
                             uint8_t out[32]);
@@ -59,6 +64,22 @@ typedef struct {
     uint8_t move;        /* кто-то движется */
 } wsn_pred_t;
 
+typedef struct {
+    uint32_t version, total, offset;
+    uint16_t len;
+    const uint8_t *data;  /* points into the received datagram */
+} wsn_model_chunk_t;
+
+typedef enum { WSN_OTA_IDLE = 0, WSN_OTA_RECEIVING = 1, WSN_OTA_ACTIVATING = 2, WSN_OTA_ERROR = 3 } wsn_ota_state_t;
+
+typedef struct {
+    uint32_t version;   /* blob being received (or last one) */
+    uint32_t received;  /* bytes stored without gaps from offset 0 */
+    uint8_t state;      /* wsn_ota_state_t */
+    uint8_t slot;       /* partition being written: 0 = model_a, 1 = model_b */
+    uint8_t error;      /* last error code, 0 = none */
+} wsn_model_ack_t;
+
 /* Number of leading frames that fit into one datagram (<= WSN_MAX_DATAGRAM, <= WSN_MAX_FRAMES). */
 size_t wsn_frames_fit(const wsn_csi_frame_t *frames, size_t n);
 
@@ -73,6 +94,12 @@ int wsn_encode_csi_src(wsn_ctx_t *ctx, const wsn_csi_frame_t *frames, size_t n, 
 int wsn_encode_telem(wsn_ctx_t *ctx, const wsn_telem_t *t, uint8_t *out, size_t cap);
 /* Encode the on-board model's answer (WSN_TYPE_PRED). Same return convention. */
 int wsn_encode_pred(wsn_ctx_t *ctx, const wsn_pred_t *r, uint8_t *out, size_t cap);
+/* Encode the OTA progress report (WSN_TYPE_MODEL_ACK). Same return convention. */
+int wsn_encode_model_ack(wsn_ctx_t *ctx, const wsn_model_ack_t *a, uint8_t *out, size_t cap);
+/* Verify and parse a server packet carrying a model chunk. It must be addressed to ctx->device_id, signed with
+ * ctx->key and carry ctx->boot_id (binds it to this boot: an old capture can not be replayed after a reboot).
+ * *seq receives the server sequence number (caller rejects seq <= last). Returns 0 or a negative error. */
+int wsn_parse_model_chunk(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_model_chunk_t *out);
 
 #ifdef __cplusplus
 }

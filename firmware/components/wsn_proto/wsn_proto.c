@@ -140,3 +140,43 @@ int wsn_encode_pred(wsn_ctx_t *ctx, const wsn_pred_t *r, uint8_t *out, size_t ca
     p = put_u8(p, r->move);
     return finish(ctx, out, p);
 }
+
+int wsn_encode_model_ack(wsn_ctx_t *ctx, const wsn_model_ack_t *a, uint8_t *out, size_t cap)
+{
+    if (!ctx || !ctx->hmac || !a || !out) return -1;
+    if (cap < WSN_HEADER_LEN + WSN_MODEL_ACK_LEN + WSN_HMAC_LEN) return -4;
+    uint8_t *p = put_header(ctx, out, WSN_TYPE_MODEL_ACK, 1);
+    p = put_u32(p, a->version);
+    p = put_u32(p, a->received);
+    p = put_u8(p, a->state);
+    p = put_u8(p, a->slot);
+    p = put_u8(p, a->error);
+    return finish(ctx, out, p);
+}
+
+static uint32_t get_u32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+int wsn_parse_model_chunk(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_model_chunk_t *out)
+{
+    if (!ctx || !ctx->hmac || !buf || !out) return -1;
+    if (len < WSN_HEADER_LEN + WSN_MODEL_CHUNK_HDR + WSN_HMAC_LEN) return -2;
+    size_t body = len - WSN_HMAC_LEN;
+    uint8_t mac[32];
+    ctx->hmac(ctx->key, ctx->key_len, buf, body, mac);
+    uint8_t diff = 0;  /* сравнение без раннего выхода */
+    for (int i = 0; i < WSN_HMAC_LEN; i++) diff |= (uint8_t)(mac[i] ^ buf[body + i]);
+    if (diff) return -3;
+    if (memcmp(buf, "WSN1", 4) != 0 || buf[4] != 1 || buf[5] != WSN_TYPE_MODEL_CHUNK || buf[20] != 1) return -4;
+    if (memcmp(buf + 6, ctx->device_id, 6) != 0) return -5;
+    if (get_u32(buf + 12) != ctx->boot_id) return -6;
+    *seq = get_u32(buf + 16);
+    const uint8_t *p = buf + WSN_HEADER_LEN;
+    out->version = get_u32(p);
+    out->total = get_u32(p + 4);
+    out->offset = get_u32(p + 8);
+    out->len = (uint16_t)(p[12] | p[13] << 8);
+    out->data = p + WSN_MODEL_CHUNK_HDR;
+    if (out->len > WSN_MODEL_CHUNK_MAX || (size_t)(WSN_HEADER_LEN + WSN_MODEL_CHUNK_HDR + out->len) != body) return -7;
+    if (out->offset > out->total || out->len > out->total - out->offset) return -8;
+    return 0;
+}

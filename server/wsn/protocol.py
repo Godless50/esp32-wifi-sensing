@@ -13,6 +13,9 @@ TYPE_CSI = 1
 TYPE_PRED = 2
 TYPE_TELEM = 3
 TYPE_CSI_SRC = 4  # CSI-кадры с MAC передатчика (несколько линий связи)
+TYPE_MODEL_CHUNK = 6  # сервер -> плата: кусок новой модели
+TYPE_MODEL_ACK = 7    # плата -> сервер: сколько модели записано
+MODEL_CHUNK_MAX = 1024
 CSI_TYPES = (TYPE_CSI, TYPE_CSI_SRC)
 HEADER_LEN = 21
 HMAC_LEN = 16
@@ -22,6 +25,8 @@ _HEADER = struct.Struct("<4sBB6sIIB")
 _FRAME = struct.Struct("<QbbBBH")
 _TELEM = struct.Struct("<ffbIIIIIB")
 _PRED = struct.Struct("<IHBB4B4BB")
+_CHUNK = struct.Struct("<IIIH")
+_ACK = struct.Struct("<IIBBB")
 assert _HEADER.size == HEADER_LEN and _FRAME.size == 14 and _TELEM.size == 30 and _PRED.size == 17
 
 
@@ -65,6 +70,17 @@ class Prediction:
 
 
 @dataclass(frozen=True)
+class ModelAck:
+    """OTA progress of a board: blob version, contiguous bytes stored, state (0 idle, 1 receiving, 2 activating,
+    3 error), slot being written (0 model_a, 1 model_b), last error code."""
+    version: int
+    received: int
+    state: int
+    slot: int
+    error: int
+
+
+@dataclass(frozen=True)
 class Packet:
     type: int
     device_id: str
@@ -73,6 +89,7 @@ class Packet:
     frames: list[CsiFrame] = field(default_factory=list)
     telemetry: Telemetry | None = None
     prediction: Prediction | None = None
+    model_ack: ModelAck | None = None
 
 
 def _mac_str(raw: bytes) -> str:
@@ -114,6 +131,7 @@ def parse_packet(buf: bytes, key: bytes) -> Packet:
     frames: list[CsiFrame] = []
     telemetry: Telemetry | None = None
     prediction: Prediction | None = None
+    model_ack: ModelAck | None = None
     if ptype in CSI_TYPES:
         for _ in range(n):
             if off + _FRAME.size > len(body):
@@ -142,11 +160,16 @@ def parse_packet(buf: bytes, key: bytes) -> Packet:
         prediction = Prediction(v[0], v[1], v[2], tuple(x / 255 for x in v[4:8]), tuple(x / 255 for x in v[8:12]),
                                 v[12] / 255)
         off += _PRED.size
+    elif ptype == TYPE_MODEL_ACK:
+        if n != 1 or off + _ACK.size > len(body):
+            raise ProtocolError("length: model ack")
+        model_ack = ModelAck(*_ACK.unpack_from(body, off))
+        off += _ACK.size
     else:
         raise ProtocolError(f"unsupported type {ptype}")
     if off != len(body):
         raise ProtocolError("length: trailing bytes")
-    return Packet(ptype, _mac_str(dev), boot_id, seq, frames, telemetry, prediction)
+    return Packet(ptype, _mac_str(dev), boot_id, seq, frames, telemetry, prediction, model_ack)
 
 
 def encode_packet(
@@ -189,4 +212,15 @@ def encode_packet(
     body = _HEADER.pack(MAGIC, VERSION, type, _mac_bytes(device_id), boot_id, seq, n) + b"".join(parts)
     if len(body) + HMAC_LEN > MAX_DATAGRAM:
         raise ProtocolError("too large")
+    return body + _sign(key, body)
+
+
+def encode_model_chunk(device_id: str, board_boot_id: int, seq: int, key: bytes, version: int, total: int,
+                       offset: int, data: bytes) -> bytes:
+    """Server -> board packet with one piece of a model blob. Header boot_id = the board's CURRENT boot id
+    (the board drops chunks of other boots), seq strictly increasing per push."""
+    if len(data) > MODEL_CHUNK_MAX or offset + len(data) > total:
+        raise ProtocolError("chunk bounds")
+    body = (_HEADER.pack(MAGIC, VERSION, TYPE_MODEL_CHUNK, _mac_bytes(device_id), board_boot_id, seq, 1)
+            + _CHUNK.pack(version, total, offset, len(data)) + data)
     return body + _sign(key, body)

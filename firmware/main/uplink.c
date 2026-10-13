@@ -9,6 +9,7 @@
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "infer.h"
+#include "model_ota.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "mbedtls/md.h"
@@ -98,6 +99,19 @@ static void uplink_task(void *arg)
         }
         wsn_pred_t pred;
         if (infer_take(&pred)) send_pkt(sock, &dst, out, wsn_encode_pred(&ctx, &pred, out, sizeof(out)));
+        if (sock >= 0) {  /* куски новой модели от сервера (подписаны, привязаны к этой загрузке) */
+            static uint8_t rx[WSN_MAX_DATAGRAM];
+            static uint32_t last_seq;
+            int r = recvfrom(sock, rx, sizeof(rx), MSG_DONTWAIT, NULL, NULL);
+            wsn_model_chunk_t ch;
+            uint32_t seq;
+            if (r > 0 && wsn_parse_model_chunk(&ctx, rx, (size_t)r, &seq, &ch) == 0 && seq > last_seq) {
+                last_seq = seq;
+                model_ota_feed(&ch);
+            }
+        }
+        wsn_model_ack_t ack;
+        if (model_ota_status(&ack)) send_pkt(sock, &dst, out, wsn_encode_model_ack(&ctx, &ack, out, sizeof(out)));
         int64_t now = esp_timer_get_time();
         if (n > 0 && (n >= WSN_MAX_FRAMES || now - first_us >= FLUSH_US)) {
             send_pkt(sock, &dst, out, wsn_encode_csi_src(&ctx, batch, n, out, sizeof(out)));

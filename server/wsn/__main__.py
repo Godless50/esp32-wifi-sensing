@@ -12,6 +12,7 @@ from .keys import KeyStore
 from .pinger import Pinger, PingerConfig
 from .live import LiveHub
 from .mirror import DatagramMirror
+from .model_push import ModelPusher
 from .recorder import Recorder
 from .store import Store
 
@@ -33,7 +34,12 @@ def main() -> None:
         recorder.on_datagram(buf, device_id, recv_t)
         mirror.send(buf)
 
-    ingest = IngestService(keys, hub.on_packet, state_path=data / "boot_state.json", on_raw=on_raw)
+    def on_packet(p, recv_t: float) -> None:
+        hub.on_packet(p, recv_t)
+        pusher.on_packet(p, recv_t)
+
+    ingest = IngestService(keys, on_packet, state_path=data / "boot_state.json", on_raw=on_raw)
+    pusher = ModelPusher(keys, ingest)
     def default_device() -> str | None:
         """The board that streamed most recently (within 10 s): the one a phone session records."""
         live = [d for d in hub.devices() if d.age_s < 10]
@@ -41,7 +47,7 @@ def main() -> None:
 
     pinger = Pinger(PingerConfig.load(data / "links.json"))
     app = create_app(hub, ingest, ui, udp_port=udp_port, store=store, recorder=recorder,
-                     default_device=default_device, pinger=pinger)
+                     default_device=default_device, pinger=pinger, pusher=pusher)
     uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
 
 

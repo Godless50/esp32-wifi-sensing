@@ -34,8 +34,13 @@ typedef struct {
 /* |H_k| of the 64 HT-LTF (or L-LTF) subcarriers from ESP CSI bytes (int8 imag, real pairs, ESP order). */
 void wsn_feat_amplitude(const int8_t *iq128, uint16_t amp[WSN_FEAT_SC]);
 
-/* frames sorted by t. Returns the number of frames used (0 -> out is all zeros). */
-int wsn_feat_link(const wsn_feat_frame_t *frames, int n, float t0, float out[WSN_FEAT_NT][WSN_FEAT_NC]);
+/* frames sorted by t. Returns the number of frames used (0 -> out is all zeros).
+ * warm: optional per-link state (2 x 64 floats, zero-initialised by the caller): the main axes of the previous
+ * window start the iteration and receive the new ones — overlapping windows converge in a few steps. NULL = cold. */
+int wsn_feat_link(const wsn_feat_frame_t *frames, int n, float t0, float out[WSN_FEAT_NT][WSN_FEAT_NC],
+                  float warm[2][WSN_FEAT_SC]);
+/* iterations of the last call (both axes), for profiling */
+int wsn_feat_last_iters(void);
 
 /* sign(x) * log1p(|x|) — the input squash of the network */
 float wsn_feat_squash(float x);

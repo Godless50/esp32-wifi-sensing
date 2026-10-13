@@ -60,6 +60,7 @@ class IngestService(asyncio.DatagramProtocol):
         }
         self._unknown: OrderedDict[str, float] = OrderedDict()
         self._state: dict[str, _DevState] = self._load_state()
+        self.addrs: dict[str, tuple] = {}  # откуда плата шлёт пакеты: туда сервер отвечает (обновление модели)
 
     @property
     def unknown_devices(self) -> list[str]:
@@ -86,7 +87,11 @@ class IngestService(asyncio.DatagramProtocol):
             json.dump(data, f)
         os.replace(tmp, self.state_path)
 
-    def handle(self, buf: bytes, recv_t: float) -> bool:
+    def boot_of(self, device_id: str) -> int | None:
+        st = self._state.get(device_id)
+        return st.boot if st else None
+
+    def handle(self, buf: bytes, recv_t: float, addr=None) -> bool:
         try:
             dev = peek_device_id(buf)
         except ProtocolError:
@@ -109,6 +114,8 @@ class IngestService(asyncio.DatagramProtocol):
             self.counters["rejected_replay"] += 1
             return False
         self.counters["accepted"] += 1
+        if addr is not None:
+            self.addrs[pkt.device_id] = addr
         for cb, args in ((self.on_raw, (buf, pkt.device_id, recv_t)), (self.on_packet, (pkt, recv_t))):
             if cb is None:
                 continue
@@ -132,4 +139,4 @@ class IngestService(asyncio.DatagramProtocol):
 
     # asyncio.DatagramProtocol
     def datagram_received(self, data: bytes, addr) -> None:
-        self.handle(data, time.monotonic())
+        self.handle(data, time.monotonic(), addr)

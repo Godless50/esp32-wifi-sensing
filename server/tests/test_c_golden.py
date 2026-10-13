@@ -61,3 +61,17 @@ def test_c_pred_packet():
     assert [round(x * 255) for x in r.act] == [10, 200, 40, 5] and [round(x * 255) for x in r.zone] == [180, 50, 20, 5]
     assert round(r.move * 255) == 230
     assert buf == encode_packet(TYPE_PRED, MAC, 0xDEADBEEF, 10, KEY, prediction=r)
+
+
+def test_c_model_ack_packet():
+    from wsn.protocol import TYPE_MODEL_ACK, ModelAck
+    p = parse_packet(_lines()[4], KEY)
+    assert (p.type, p.seq) == (TYPE_MODEL_ACK, 11)
+    assert p.model_ack == ModelAck(1791871129, 2048, 1, 1, 0)
+
+
+def test_py_model_chunk_fixture_is_current():
+    """The C parser test reads this fixture; it must stay what encode_model_chunk produces."""
+    from wsn.protocol import encode_model_chunk
+    fx = (Path(__file__).parent / "golden" / "py_model_chunk.hex").read_text().split()[0]
+    assert encode_model_chunk(MAC, 0xDEADBEEF, 5, KEY, 1791871129, 3000, 1024, bytes(range(100))).hex() == fx

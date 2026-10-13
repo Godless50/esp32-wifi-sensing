@@ -55,5 +55,11 @@ int main(void)
     n = wsn_encode_pred(&c, &r, out, sizeof(out));
     if (n < 0) return 1;
     hex(out, n);
+
+    /* seq 11: OTA progress */
+    wsn_model_ack_t ack = {.version = 1791871129u, .received = 2048, .state = WSN_OTA_RECEIVING, .slot = 1, .error = 0};
+    n = wsn_encode_model_ack(&c, &ack, out, sizeof(out));
+    if (n < 0) return 1;
+    hex(out, n);
     return 0;
 }
