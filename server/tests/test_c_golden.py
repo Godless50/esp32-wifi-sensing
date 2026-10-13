@@ -49,3 +49,15 @@ def test_c_csi_src_packet():
     assert (p.type, p.seq) == (TYPE_CSI_SRC, 9)
     assert p.frames == expected
     assert buf == encode_packet(TYPE_CSI_SRC, MAC, 0xDEADBEEF, 9, KEY, frames=expected)
+
+
+def test_c_pred_packet():
+    from wsn.protocol import TYPE_PRED, Prediction
+    buf = _lines()[3]
+    p = parse_packet(buf, KEY)
+    assert (p.type, p.seq) == (TYPE_PRED, 10)
+    r = p.prediction
+    assert (r.model_ver, r.infer_ms, r.links_live) == (1791870150, 87, 8)
+    assert [round(x * 255) for x in r.act] == [10, 200, 40, 5] and [round(x * 255) for x in r.zone] == [180, 50, 20, 5]
+    assert round(r.move * 255) == 230
+    assert buf == encode_packet(TYPE_PRED, MAC, 0xDEADBEEF, 10, KEY, prediction=r)

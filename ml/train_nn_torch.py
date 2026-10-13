@@ -22,15 +22,27 @@ from nn_common import ACT_NAMES, SCRIPTED, act_class, augment, bal, confusion, s
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+ARCH = "s2"  # по умолчанию — вариант для платы
+
+
 class Net(nn.Module):
-    def __init__(self, L: int, C: int, n_zone: int = 4, w: int = 32):
+    """arch "dil": свёртки с разрежением 2 и 4 (первые модели; на плате идут медленным путём TFLM);
+    arch "s2": вторая свёртка с шагом 2 вместо разрежения — те же ~1.7 с обзора, свёртки esp-nn на S3."""
+
+    def __init__(self, L: int, C: int, n_zone: int = 4, w: int = 32, arch: str = ARCH):
         super().__init__()
-        self.enc = nn.Sequential(  # общий кодер одной линии: [C, T] -> [w]
-            nn.Conv1d(C, 24, 5, padding=2), nn.ReLU(),
-            nn.Conv1d(24, w, 5, padding=4, dilation=2), nn.ReLU(),
-            nn.Conv1d(w, w, 3, padding=4, dilation=4), nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
-        )
+        self.arch = arch
+        if arch == "dil":
+            convs = [nn.Conv1d(C, 24, 5, padding=2), nn.ReLU(),
+                     nn.Conv1d(24, w, 5, padding=4, dilation=2), nn.ReLU(),
+                     nn.Conv1d(w, w, 3, padding=4, dilation=4), nn.ReLU()]
+        elif arch == "s2":
+            convs = [nn.Conv1d(C, 24, 5, padding=2), nn.ReLU(),
+                     nn.Conv1d(24, w, 5, stride=2, padding=2), nn.ReLU(),
+                     nn.Conv1d(w, w, 5, padding=2), nn.ReLU()]
+        else:
+            raise ValueError(arch)
+        self.enc = nn.Sequential(*convs, nn.AdaptiveAvgPool1d(1))  # общий кодер одной линии: [C, T] -> [w]
         self.zone = nn.Sequential(nn.Linear(L * w, 64), nn.ReLU(), nn.Dropout(0.3), nn.Linear(64, n_zone))
         self.trunk = nn.Sequential(nn.Linear(2 * w, 48), nn.ReLU(), nn.Dropout(0.3))
         self.act, self.move = nn.Linear(48, 4), nn.Linear(48, 1)
@@ -42,12 +54,12 @@ class Net(nn.Module):
         return self.act(h), self.zone(e.reshape(B, -1)), self.move(h)[:, 0]
 
 
-def fit(Xtr, ya, yz, ym, epochs, seed, bs=64, init_enc=None, enc_lr=0.3, init_state=None, lr=2e-3):
+def fit(Xtr, ya, yz, ym, epochs, seed, bs=64, init_enc=None, enc_lr=0.3, init_state=None, lr=2e-3, arch=ARCH):
     """init_enc: state_dict of a pretrained link encoder (pretrain_ext.py); it then learns at enc_lr x the base rate.
     init_state: a whole trained Net to continue from (online updates, usually with a smaller lr)."""
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
-    net = Net(Xtr.shape[1], Xtr.shape[3]).to(DEV)
+    net = Net(Xtr.shape[1], Xtr.shape[3], arch=arch).to(DEV)
     if init_state is not None:
         net.load_state_dict(init_state)
         opt = torch.optim.AdamW(net.parameters(), lr, weight_decay=1e-3)

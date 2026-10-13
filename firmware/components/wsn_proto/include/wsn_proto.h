@@ -14,6 +14,7 @@ extern "C" {
 #define WSN_FRAME_HDR_LEN 14
 #define WSN_FRAME_SRC_HDR_LEN 20 /* + 6-byte transmitter MAC */
 #define WSN_TELEM_LEN 30
+#define WSN_PRED_LEN 17 /* model_ver u32, infer_ms u16, links_live u8, rsv u8, act[4], zone[4], move: u8 = p*255 */
 #define WSN_HMAC_LEN 16
 
 #define WSN_TYPE_CSI 1
@@ -49,6 +50,15 @@ typedef struct {
     uint8_t wifi_state;
 } wsn_telem_t;
 
+typedef struct {
+    uint32_t model_ver;
+    uint16_t infer_ms;   /* время признаков + сети на плате */
+    uint8_t links_live;  /* сколько линий модели было живо в окне */
+    uint8_t act[4];      /* вероятности x255: нет движения, машет, ходит, мелкие */
+    uint8_t zone[4];     /* зал, кухня, коридор, санузел */
+    uint8_t move;        /* кто-то движется */
+} wsn_pred_t;
+
 /* Number of leading frames that fit into one datagram (<= WSN_MAX_DATAGRAM, <= WSN_MAX_FRAMES). */
 size_t wsn_frames_fit(const wsn_csi_frame_t *frames, size_t n);
 
@@ -61,6 +71,8 @@ int wsn_encode_csi_src(wsn_ctx_t *ctx, const wsn_csi_frame_t *frames, size_t n, 
 
 /* Encode telemetry packet. Same return convention. */
 int wsn_encode_telem(wsn_ctx_t *ctx, const wsn_telem_t *t, uint8_t *out, size_t cap);
+/* Encode the on-board model's answer (WSN_TYPE_PRED). Same return convention. */
+int wsn_encode_pred(wsn_ctx_t *ctx, const wsn_pred_t *r, uint8_t *out, size_t cap);
 
 #ifdef __cplusplus
 }

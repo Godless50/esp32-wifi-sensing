@@ -281,8 +281,12 @@ function onBreath(m) {
 let pred = null;  // последний ответ модели (learner): зона, действие, уверенность
 const ZONE_P_MIN = 0.5, MOVE_P_MIN = 0.5;
 
+let predBoard = null;  // ответ модели на самой плате
+const boardEl = document.getElementById("board");
+
 function onPred(m) {
-  pred = { ...m, seen: performance.now() };
+  if (m.source === "board") predBoard = { ...m, seen: performance.now() };
+  else pred = { ...m, seen: performance.now() };
 }
 
 function connect() {
@@ -352,6 +356,12 @@ renderer.setAnimationLoop((t) => {
   } else {
     where.textContent = act.size ? (best ? `· похоже: ${best[0]}` : "· тихо") : "";
   }
+  if (predBoard && now - predBoard.seen < 3000) {
+    const pct = (x) => `${Math.round(100 * x)}%`;
+    boardEl.textContent = predBoard.moving_p >= MOVE_P_MIN
+      ? `· плата: ${predBoard.zone} ${pct(predBoard.zone_p)}, ${predBoard.activity} (${predBoard.infer_ms} мс)`
+      : `· плата: тихо (${predBoard.infer_ms} мс)`;
+  } else boardEl.textContent = "";
   const br = [];
   for (const l of links.values()) {
     if (l.breath && now - l.breath.t > BREATH_FRESH_MS) dropBreath(l);

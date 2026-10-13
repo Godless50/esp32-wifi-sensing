@@ -8,6 +8,7 @@
 #include "esp_mac.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
+#include "infer.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "mbedtls/md.h"
@@ -83,6 +84,7 @@ static void uplink_task(void *arg)
 
         int8_t *slot = data[n];
         if (csi_capture_pop(&batch[n], slot, pdMS_TO_TICKS(10))) {
+            infer_push(&batch[n]);  /* копия амплитуды для модели на плате */
             if (n == 0) first_us = esp_timer_get_time();
             n++;
             if (wsn_frames_fit_src(batch, n) < n) { /* newest frame does not fit: flush the rest */
@@ -94,6 +96,8 @@ static void uplink_task(void *arg)
                 first_us = esp_timer_get_time();
             }
         }
+        wsn_pred_t pred;
+        if (infer_take(&pred)) send_pkt(sock, &dst, out, wsn_encode_pred(&ctx, &pred, out, sizeof(out)));
         int64_t now = esp_timer_get_time();
         if (n > 0 && (n >= WSN_MAX_FRAMES || now - first_us >= FLUSH_US)) {
             send_pkt(sock, &dst, out, wsn_encode_csi_src(&ctx, batch, n, out, sizeof(out)));
@@ -115,7 +119,7 @@ static void uplink_task(void *arg)
                 .psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                 .uptime_s = (uint32_t)(now / 1000000),
                 .fw_ver = WSN_FW_VER,
-                .model_ver = 0,
+                .model_ver = infer_model_ver(),
                 .wifi_state = (uint8_t)wifi_mgr_state(),
             };
             send_pkt(sock, &dst, out, wsn_encode_telem(&ctx, &t, out, sizeof(out)));

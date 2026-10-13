@@ -51,7 +51,7 @@ def load_model(path: Path):
     meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
     nets = []
     for i in range(meta["seeds"]):
-        n = Net(len(meta["links"]), NC)
+        n = Net(len(meta["links"]), NC, arch=meta.get("arch", "dil"))
         n.load_state_dict(torch.load(path / f"net{i}.pt", map_location="cpu"))
         nets.append(n.eval())
     return meta, nets
@@ -186,7 +186,7 @@ class Learner:
             cand = []
             for i, n in enumerate(nets):
                 st = {k: v.clone() for k, v in n.state_dict().items()}
-                new = fit(X, ya, yz, ym, a.adapt_epochs, 100 + i, init_state=st, lr=a.lr)
+                new = fit(X, ya, yz, ym, a.adapt_epochs, 100 + i, init_state=st, lr=a.lr, arch=meta.get("arch", "dil"))
                 cand.append(new.cpu().eval())
             old_s, new_s = self.scores(nets), self.scores(cand)
             na = ensemble(cand, L)[0].argmax(1)

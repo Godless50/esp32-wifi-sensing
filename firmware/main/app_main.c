@@ -3,6 +3,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "infer.h"
 #include "nvs_flash.h"
 #include "ping_gen.h"
 #include "settings.h"
@@ -48,6 +49,7 @@ void app_main(void)
         err = csi_capture_start(s_settings.bssid, s_settings.csi_source, s_settings.links, s_settings.n_links);
         warn_if(err, "csi capture");
         if (err == ESP_OK) warn_if(uplink_start(&s_settings, boot_id), "uplink");
+        if (err == ESP_OK) warn_if(infer_start(), "model (CSI streaming continues without it)");
     } else if (complete && boot_id == 0) {
         ESP_LOGE(TAG, "boot counter unavailable (NVS): uplink disabled");
     }

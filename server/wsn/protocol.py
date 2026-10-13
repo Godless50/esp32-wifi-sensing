@@ -21,7 +21,8 @@ MAX_DATAGRAM = 1400
 _HEADER = struct.Struct("<4sBB6sIIB")
 _FRAME = struct.Struct("<QbbBBH")
 _TELEM = struct.Struct("<ffbIIIIIB")
-assert _HEADER.size == HEADER_LEN and _FRAME.size == 14 and _TELEM.size == 30
+_PRED = struct.Struct("<IHBB4B4BB")
+assert _HEADER.size == HEADER_LEN and _FRAME.size == 14 and _TELEM.size == 30 and _PRED.size == 17
 
 
 class ProtocolError(ValueError):
@@ -53,6 +54,17 @@ class Telemetry:
 
 
 @dataclass(frozen=True)
+class Prediction:
+    """Answer of the on-board model; probabilities 0..1 (sent as u8 = p*255)."""
+    model_ver: int
+    infer_ms: int
+    links_live: int
+    act: tuple[float, float, float, float]   # нет движения, машет, ходит, мелкие
+    zone: tuple[float, float, float, float]  # зал, кухня, коридор, санузел
+    move: float
+
+
+@dataclass(frozen=True)
 class Packet:
     type: int
     device_id: str
@@ -60,6 +72,7 @@ class Packet:
     seq: int
     frames: list[CsiFrame] = field(default_factory=list)
     telemetry: Telemetry | None = None
+    prediction: Prediction | None = None
 
 
 def _mac_str(raw: bytes) -> str:
@@ -100,6 +113,7 @@ def parse_packet(buf: bytes, key: bytes) -> Packet:
     off = HEADER_LEN
     frames: list[CsiFrame] = []
     telemetry: Telemetry | None = None
+    prediction: Prediction | None = None
     if ptype in CSI_TYPES:
         for _ in range(n):
             if off + _FRAME.size > len(body):
@@ -121,11 +135,18 @@ def parse_packet(buf: bytes, key: bytes) -> Packet:
             raise ProtocolError("length: telemetry")
         telemetry = Telemetry(*_TELEM.unpack_from(body, off))
         off += _TELEM.size
+    elif ptype == TYPE_PRED:
+        if n != 1 or off + _PRED.size > len(body):
+            raise ProtocolError("length: prediction")
+        v = _PRED.unpack_from(body, off)
+        prediction = Prediction(v[0], v[1], v[2], tuple(x / 255 for x in v[4:8]), tuple(x / 255 for x in v[8:12]),
+                                v[12] / 255)
+        off += _PRED.size
     else:
         raise ProtocolError(f"unsupported type {ptype}")
     if off != len(body):
         raise ProtocolError("length: trailing bytes")
-    return Packet(ptype, _mac_str(dev), boot_id, seq, frames, telemetry)
+    return Packet(ptype, _mac_str(dev), boot_id, seq, frames, telemetry, prediction)
 
 
 def encode_packet(
@@ -136,6 +157,7 @@ def encode_packet(
     key: bytes,
     frames: list[CsiFrame] | None = None,
     telemetry: Telemetry | None = None,
+    prediction: Prediction | None = None,
 ) -> bytes:
     parts: list[bytes] = []
     if type in CSI_TYPES:
@@ -155,6 +177,13 @@ def encode_packet(
             _TELEM.pack(t.csi_hz, t.drop_ratio, t.rssi_avg, t.heap_free, t.psram_free,
                         t.uptime_s, t.fw_ver, t.model_ver, t.wifi_state)
         )
+    elif type == TYPE_PRED:
+        if prediction is None:
+            raise ProtocolError("prediction required")
+        n = 1
+        r = prediction
+        q = lambda x: max(0, min(255, round(x * 255)))
+        parts.append(_PRED.pack(r.model_ver, r.infer_ms, r.links_live, 0, *map(q, r.act), *map(q, r.zone), q(r.move)))
     else:
         raise ProtocolError(f"unsupported type {type}")
     body = _HEADER.pack(MAGIC, VERSION, type, _mac_bytes(device_id), boot_id, seq, n) + b"".join(parts)

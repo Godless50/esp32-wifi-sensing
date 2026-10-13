@@ -176,7 +176,7 @@ def create_app(
 
     @app.post("/api/predict")
     def add_prediction(req: Prediction) -> dict:
-        hub.publish({"type": "pred", "t": time.monotonic(), **req.model_dump()})
+        hub.publish({"type": "pred", "source": "server", "t": time.monotonic(), **req.model_dump()})
         return {"ok": True}
 
     @app.post("/api/sessions/{sid}/stop")

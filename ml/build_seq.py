@@ -50,6 +50,7 @@ def link_seq(t: np.ndarray, H: np.ndarray, t0: float) -> np.ndarray:
     okj = ~np.isnan(jit)
     jit = np.interp(x, x[okj], jit[okj]) if okj.sum() >= 2 else np.zeros(NT)
     _, _, vt = np.linalg.svd(means - means.mean(0), full_matrices=False)
+    vt = vt * np.where(vt.sum(1, keepdims=True) < 0, -1.0, 1.0)  # знак главных направлений: сумма весов >= 0 (как на плате)
     out[:, 0] = np.abs(means).mean(1)
     out[:, 1] = jit
     out[:, 2] = means @ vt[0]

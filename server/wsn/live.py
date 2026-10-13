@@ -12,7 +12,7 @@ from typing import Literal
 import numpy as np
 
 from .breath import SCORE_OK, SPREAD_OK, amplitude_series, score_series
-from .protocol import CSI_TYPES, TYPE_TELEM, Packet, Telemetry
+from .protocol import CSI_TYPES, TYPE_PRED, TYPE_TELEM, Packet, Prediction, Telemetry
 
 _LTF_BYTES = 128  # 64 subcarriers x (imag, real) int8
 # ESP-IDF buffer order inside one LTF: subcarriers 0..31, then -32..-1. Reorder to -32..31.
@@ -64,6 +64,21 @@ def motion_energy(amps: np.ndarray, normalize: bool = False) -> float:
 
 BREATH_WINDOW_S, BREATH_MIN_S, BREATH_PERIOD_S, BREATH_HZ = 120.0, 90.0, 15.0, 20.0
 LEGACY_AFTER_S = 10.0  # линия без HT-кадров дольше этого — считаем её по L-LTF (устройства 11g)
+
+
+BOARD_ZONES = ("зал", "кухня", "коридор", "санузел")          # порядок выходов модели платы (ml/train_final.py)
+BOARD_ACTS = ("нет движения", "машет", "ходит", "мелкие")
+
+
+def board_prediction(device_id: str, t: float, r: Prediction) -> dict:
+    """The on-board model's answer in the same shape as the server learner's /api/predict message."""
+    zi = max(range(4), key=lambda i: r.zone[i])
+    ai = max(range(4), key=lambda i: r.act[i])
+    return {"type": "pred", "source": "board", "device_id": device_id, "t": t,
+            "zone": BOARD_ZONES[zi], "zone_p": round(r.zone[zi], 3), "activity": BOARD_ACTS[ai],
+            "activity_p": round(r.act[ai], 3), "moving_p": round(r.move, 3),
+            "probs": {z: round(p, 3) for z, p in zip(BOARD_ZONES, r.zone)},
+            "model": f"плата v{r.model_ver}", "infer_ms": r.infer_ms, "links_live": r.links_live}
 
 
 class _Motion:
@@ -175,6 +190,9 @@ class LiveHub:
             st.telemetry = p.telemetry
             self._broadcast({"type": "telem", "device_id": p.device_id, "t": recv_t,
                              **dataclasses.asdict(p.telemetry)})
+            return
+        if p.type == TYPE_PRED and p.prediction is not None:
+            self._broadcast(board_prediction(p.device_id, recv_t, p.prediction))
             return
         if p.type not in CSI_TYPES or not p.frames:
             return

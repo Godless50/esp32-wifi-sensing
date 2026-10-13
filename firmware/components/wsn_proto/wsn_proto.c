@@ -125,3 +125,18 @@ int wsn_encode_telem(wsn_ctx_t *ctx, const wsn_telem_t *t, uint8_t *out, size_t 
     p = put_u8(p, t->wifi_state);
     return finish(ctx, out, p);
 }
+
+int wsn_encode_pred(wsn_ctx_t *ctx, const wsn_pred_t *r, uint8_t *out, size_t cap)
+{
+    if (!ctx || !ctx->hmac || !r || !out) return -1;
+    if (cap < WSN_HEADER_LEN + WSN_PRED_LEN + WSN_HMAC_LEN) return -4;
+    uint8_t *p = put_header(ctx, out, WSN_TYPE_PRED, 1);
+    p = put_u32(p, r->model_ver);
+    p = put_u16(p, r->infer_ms);
+    p = put_u8(p, r->links_live);
+    p = put_u8(p, 0);
+    for (int i = 0; i < 4; i++) p = put_u8(p, r->act[i]);
+    for (int i = 0; i < 4; i++) p = put_u8(p, r->zone[i]);
+    p = put_u8(p, r->move);
+    return finish(ctx, out, p);
+}

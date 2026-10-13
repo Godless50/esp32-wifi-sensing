@@ -17,7 +17,7 @@ import torch
 
 from build_rich import LINKS
 from nn_common import ACT_NAMES, SCRIPTED, act_class
-from train_nn_torch import Net, fit
+from train_nn_torch import ARCH, Net, fit
 
 ZONES4 = ["зал", "кухня", "коридор", "санузел"]
 ZMAP = {1: 0, 2: 1, 3: 2, 4: 3}
@@ -48,7 +48,7 @@ def main() -> None:
     for s in range(a.seeds):
         net = fit(X, ya, yz, ym, a.epochs, s, init_enc=enc)
         torch.save({k: v.cpu() for k, v in net.state_dict().items()}, out / f"net{s}.pt")
-    meta = {"version": int(time.time()), "links": list(LINKS), "zones": ZONES4, "activities": ACT_NAMES,
+    meta = {"version": int(time.time()), "arch": ARCH, "links": list(LINKS), "zones": ZONES4, "activities": ACT_NAMES,
             "seeds": a.seeds, "epochs": a.epochs, "trained_on": sorted(set(d["session"].tolist())),
             "encoder": a.encoder, "params": sum(p.numel() for p in net.parameters()), "seconds": round(time.time() - t0)}
     (out / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))

@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from nn_common import SCRIPTED, act_class, bal, squash
-from train_nn_torch import DEV, Net, fit, predict
+from train_nn_torch import ARCH, DEV, Net, fit, predict
 
 TRANSITION = {1, 2, 4, 5, 7, 8}
 
@@ -107,6 +107,7 @@ def main() -> None:
     ap.add_argument("--pre-epochs", type=int, default=25)
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--seeds", type=int, default=3)
+    ap.add_argument("--skip-loso", action="store_true", help="only pretrain and save the encoder")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
@@ -116,8 +117,11 @@ def main() -> None:
     hold = projects[::8]  # каждый восьмой проект — проверка предобучения
     enc, val = pretrain(ext, a.pre_epochs, hold)
     torch.save(enc, out / "encoder.pt")
-    rep = {"pretrain": {"windows": int(len(ext["X"])), "held_out_projects": hold, **val, "seconds": round(time.time() - t0)}}
+    rep = {"pretrain": {"arch": ARCH, "windows": int(len(ext["X"])), "held_out_projects": hold, **val, "seconds": round(time.time() - t0)}}
     print("pretrain", rep["pretrain"], flush=True)
+    if a.skip_loso:
+        (out / "report.json").write_text(json.dumps(rep, ensure_ascii=False, indent=1))
+        return
     d = np.load(a.ours)
     X, sess, act, zone = d["X"].astype(np.float32), d["session"], d["act"], d["zone"]
     ya = act_class(act)

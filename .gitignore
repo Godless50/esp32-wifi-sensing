@@ -15,3 +15,5 @@ firmware/components/wsn_proto/test/util_test
 ui/download/
 node_modules/
 .venv-rocm/
+firmware/managed_components/
+firmware/components/wsn_feat/test/test_feat

@@ -262,3 +262,15 @@ def test_mirror_delivers_and_never_raises(tmp_path):
     m.send(b"pkt")
     assert rx.recv(64) == b"pkt" and m.sent == 1
     rx.close(); m.close()
+
+
+
+async def test_board_prediction_is_broadcast():
+    from wsn.protocol import TYPE_PRED, Prediction
+    hub = LiveHub(decimate_hz=1.0)
+    sub = hub.subscribe()
+    r = Prediction(7, 80, 8, (0.1, 0.7, 0.15, 0.05), (0.6, 0.2, 0.1, 0.1), 0.9)
+    hub.on_packet(Packet(TYPE_PRED, MAC, 1, 3, [], None, r), 5.0)
+    m = sub.queue.get_nowait()
+    assert m["type"] == "pred" and m["source"] == "board" and m["zone"] == "зал" and m["activity"] == "машет"
+    assert m["model"] == "плата v7" and m["moving_p"] == 0.9

@@ -48,5 +48,12 @@ int main(void)
     n = wsn_encode_csi_src(&c, f, 2, out, sizeof(out));
     if (n < 0) return 1;
     hex(out, n);
+
+    /* seq 10: on-board model answer */
+    wsn_pred_t r = {.model_ver = 1791870150u, .infer_ms = 87, .links_live = 8,
+                    .act = {10, 200, 40, 5}, .zone = {180, 50, 20, 5}, .move = 230};
+    n = wsn_encode_pred(&c, &r, out, sizeof(out));
+    if (n < 0) return 1;
+    hex(out, n);
     return 0;
 }

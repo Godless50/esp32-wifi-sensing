@@ -1,0 +1,6 @@
+## Зависимости из реестра компонентов Espressif.
+## esp-tflite-micro: TensorFlow Lite Micro; на ESP32-S3 его свёртки и полносвязные слои идут через esp-nn
+## (векторные инструкции S3), модель int8 лежит в разделе model_a/model_b.
+dependencies:
+  idf: ">=5.4"
+  espressif/esp-tflite-micro: "~1.4.1"  # тянет espressif/esp-nn 1.4.x
