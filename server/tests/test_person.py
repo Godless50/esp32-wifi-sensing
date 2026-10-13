@@ -217,3 +217,12 @@ def test_counts_and_pose_from_the_multi_head_model_are_smoothed():
     last = out[-1]
     assert last["people"]["n"] == 2 and last["counts"] == {"A": 2}
     assert "pose" not in last  # людей двое — позу одного не показываем
+
+
+def test_zone_answers_only_from_the_board_the_models_were_trained_on():
+    tr, out = tracker()
+    feed(tr, 0.0, 6.0, pa=0.95)  # d1 — первая плата плана
+    n = len(out)
+    b = tr.belief.copy()
+    tr.on_message(pred(6.25, pa=0.0, dev="d2"))  # модель второй платы этим линиям не учена
+    assert len(out) == n and np.allclose(tr.belief, b)

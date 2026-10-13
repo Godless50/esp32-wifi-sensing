@@ -136,6 +136,9 @@ class Grid:
         self.router = np.array(plan["router"], float) if plan.get("router") else None
         boards = {str(b["device_id"]).lower(): np.array(b["xy"], float) for b in plan.get("boards") or []}
         self.boards = boards
+        # модели (зоны, люди) обучены на линиях первой платы плана: ответы других плат о зонах не принимаем,
+        # их линии идут только в геометрию
+        self.model_board = str(plan["boards"][0]["device_id"]).lower() if plan.get("boards") else None
         self.default_rx = np.array(plan.get("board") or [0.0, 0.0], float) if not boards else None
         # входная дверь: проём, рядом с которым клетки только одной комнаты (на внешней стене)
         self.exits = []
@@ -373,6 +376,8 @@ class PersonTracker:
         if now - t > PRED_MAX_AGE_S:
             return None
         if msg.get("links_live") is not None and int(msg["links_live"]) < MIN_LINKS_LIVE:
+            return None
+        if g.model_board and str(msg.get("device_id", "")).lower() not in (g.model_board, ""):
             return None
         probs = msg.get("probs") or {}
         if not probs:
