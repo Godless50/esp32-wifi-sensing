@@ -2,7 +2,7 @@ build/
 sdkconfig
 sdkconfig.old
 *.log
-data/
+/data/
 __pycache__/
 .venv/
 secrets*

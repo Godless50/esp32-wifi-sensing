@@ -126,6 +126,9 @@ async def test_scenario_labels(rig, tmp_path):
         bad = dict(body, subject={"zone": "кухня", "act": "танцует"})
         assert (await c.post("/api/labels", json=bad)).status_code == 422
         assert (await c.get("/scenario")).status_code == 200
+        (lab,) = (await c.get(f"/api/sessions/{sid}/labels")).json()
+        assert lab["script"] and lab["subject"]["act"] == "машет" and lab["note"] == "сценарий: кухня машет" and lab["t"] >= 0
+        assert (await c.get("/api/sessions/nope/labels")).status_code == 404
         await c.post(f"/api/sessions/{sid}/stop")
     evs = [json.loads(x) for x in (store.session_dir(sid) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     (lab,) = [e for e in evs if e["kind"] == "occupancy"]

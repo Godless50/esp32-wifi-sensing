@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Записи</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --line: #262c35; --text: #e6e9ee; --muted: #8a93a1;
+    --ok: #3fb68b; --warn: #e0a43a; --bad: #e0564f; --accent: #5aa2ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) { --bg: #f5f6f8; --panel: #ffffff; --line: #dde1e7; --text: #1b1f24; --muted: #5f6873; }
+  }
+  :root[data-theme="light"] { --bg: #f5f6f8; --panel: #ffffff; --line: #dde1e7; --text: #1b1f24; --muted: #5f6873; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  nav a { color: var(--muted); text-decoration: none; margin-right: 10px; font-size: 13px; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; }
+  .s { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; }
+  .s summary { cursor: pointer; padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; }
+  .s summary .when { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .tag { font-size: 12px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); }
+  .tag.script { border-color: var(--accent); color: var(--accent); }
+  .tag.live { border-color: var(--ok); color: var(--ok); }
+  ol { margin: 0; padding: 0 14px 12px 34px; }
+  li { padding: 2px 0; overflow-wrap: anywhere; }
+  li .t { font-variant-numeric: tabular-nums; color: var(--muted); margin-right: 6px; }
+  #err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Записи</h1>
+  <nav><a href="/">Квартира</a><a href="/scenario">Сценарий</a><a href="/device">Плата</a><a href="/capture">Съёмка</a></nav>
+</header>
+<main>
+  <p class="muted">Все записи CSI с разметкой «кто где». Откройте запись, чтобы увидеть метки по времени.</p>
+  <div id="err"></div>
+  <div id="list">загрузка…</div>
+</main>
+<script type="module" src="/static/data/data.js"></script>
+</body>
+</html>

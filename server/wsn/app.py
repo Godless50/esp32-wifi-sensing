@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -171,6 +172,25 @@ def create_app(
     @app.get("/api/sessions")
     def list_sessions() -> list[dict]:
         return [dataclasses.asdict(s) for s in _store().list_sessions()]
+
+    @app.get("/api/sessions/{sid}/labels")
+    def session_labels(sid: str) -> list[dict]:
+        """Разметка записи «кто где» по времени от начала записи, с."""
+        st = _store()
+        info = next((s for s in st.list_sessions() if s.id == sid), None)
+        if info is None:
+            raise HTTPException(404, "no such session")
+        path = st.session_dir(sid) / "events.jsonl"
+        out = []
+        for line in (path.read_text(encoding="utf-8").splitlines() if path.exists() else []):
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("kind") == "occupancy" and isinstance(e.get("t"), (int, float)):
+                out.append({"t": round(e["t"] - info.started, 1), "note": e.get("note", ""), "script": bool(e.get("script")),
+                            "subject": e.get("subject"), "zones": e.get("zones", {})})
+        return out
 
     @app.delete("/api/sessions/{sid}")
     def delete_session(sid: str) -> dict:
