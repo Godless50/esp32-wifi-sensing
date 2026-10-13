@@ -74,6 +74,12 @@ BREATH_FRESH_S = 60.0
 XY_EMA_S = 0.2
 EMIT_PERIOD_S, HEAT_PERIOD_S, HEAT_MAX = 0.25, 1.0, 80
 COUNT_ON, COUNT_HOLD_S, EXPLAIN_S = 3.0, 2.0, 0.25
+# Комнаты (сообщение "rooms" раз в секунду): движение по каждой комнате плана.
+#   плата в комнате: человек рядом с приёмником возмущает почти все его линии — медиана их активности;
+#   остальные комнаты: общая оценка движения x доля веры трекера в этой комнате (примерно).
+ROOM_EMIT_S, ROOM_HIST_S, ROOM_HIST_STEP = 1.0, 600.0, 5.0
+ROOM_MOTION_ON = 0.35  # с этого уровня в комнате «движение»
+LOCAL_MIN_LINKS = 3
 EXTRA_EMA_S = 3.0  # сглаживание числа людей и позы от многоголовой модели
 EXTRA_FRESH_S = 5.0
 
@@ -248,6 +254,11 @@ class PersonTracker:
         self._last_heat = -1e9
         self._breath = None  # (t, bpm)
         self._extra: dict[str, tuple[float, object]] = {}  # поле -> (t, сглаженное значение)
+        self._score = 0.0  # общая оценка «кто-то движется» 0..1
+        self._room_hist: dict[str, deque] = {}
+        self._room_last_motion: dict[str, float] = {}
+        self._link_breath: dict[tuple[str, str], tuple[float, float]] = {}  # линия -> (t, вдохов/мин)
+        self._rooms_at = -1e9
         self.last: dict | None = None
 
     # ---- план ----
@@ -319,11 +330,16 @@ class PersonTracker:
             if msg.get("ok"):
                 with self._lock:
                     self._breath = (float(msg["t"]), float(msg["bpm"]))
+                    key = (str(msg.get("device_id", "")).lower(), str(msg.get("src", "")).lower())
+                    self._link_breath[key] = (float(msg["t"]), float(msg["bpm"]))
         elif kind == "pred":
             with self._lock:
                 out = self._on_pred(msg)
-            if out is not None and self.publish is not None:
-                self.publish(out)
+                rooms = self._room_states(self._t) if self.grid is not None and self._t is not None else None
+            if self.publish is not None:
+                for m in (out, rooms):
+                    if m is not None:
+                        self.publish(m)
 
     def _on_motion(self, msg: dict) -> None:
         key = (str(msg.get("device_id", "")).lower(), str(msg.get("src", "")).lower())
@@ -397,6 +413,7 @@ class PersonTracker:
         top = sorted(acts.values(), reverse=True)[:2]
         link_mv = sum(top) / len(top) if top else 0.0
         score = 0.75 * model_mv + 0.25 * link_mv if fresh else link_mv
+        self._score = score
         self._update_moving(score, now)
         # активность (машет / ходит / ...): EMA вероятности класса
         if msg.get("activity"):
@@ -571,6 +588,69 @@ class PersonTracker:
         self.last = out
         self._save_state(now)
         return out
+
+    def _link_room(self, dev: str, src: str, primary: bool) -> str | None:
+        """Room label of a link for breathing: where its transmitter stands (else the receiver)."""
+        g = self.grid
+        tx = g.tx.get(src)
+        if tx is None and primary:
+            tx = g.router
+        p = tx if tx is not None else g.boards.get(dev, g.default_rx)
+        if p is None:
+            return None
+        return g.labels[g.label_idx[int(np.argmin(np.hypot(*(g.xy - p).T)))]]
+
+    def _room_states(self, now: float) -> dict | None:
+        if now - self._rooms_at < ROOM_EMIT_S - 1e-9:
+            return None
+        self._rooms_at = now
+        g = self.grid
+        acts = self._link_activity(now)
+        per_board: dict[str, list[float]] = {}
+        for (dev, _), a in acts.items():
+            per_board.setdefault(dev, []).append(a)
+        local: dict[str, float] = {}
+        board_room: dict[str, str] = {}
+        for dev, p in g.boards.items():
+            lab = g.labels[g.label_idx[int(np.argmin(np.hypot(*(g.xy - p).T)))]]
+            board_room[dev] = lab
+            xs = per_board.get(dev, [])
+            if len(xs) >= LOCAL_MIN_LINKS:
+                local[lab] = max(local.get(lab, 0.0), float(np.median(xs)))
+        mass = np.bincount(g.label_idx, weights=self.belief, minlength=len(g.labels))
+        breath: dict[str, float] = {}
+        for (dev, src), (tb, bpm) in self._link_breath.items():
+            if now - tb <= BREATH_FRESH_S:
+                ln = self._links.get((dev, src))
+                lab = self._link_room(dev, src, bool(ln and ln.primary))
+                if lab is not None:
+                    breath[lab] = bpm
+        rooms = []
+        for i, lab in enumerate(g.labels):
+            est = float(self._score) * float(mass[i]) if self.moving else 0.0
+            m = max(local.get(lab, 0.0), est)
+            if m >= ROOM_MOTION_ON:
+                self._room_last_motion[lab] = now
+            h = self._room_hist.setdefault(lab, deque())
+            h.append((now, m))
+            while h and h[0][0] < now - ROOM_HIST_S:
+                h.popleft()
+            bins = {}
+            for t_, v in h:  # максимум за каждые ROOM_HIST_STEP секунд, от старых к новым
+                k = int((now - t_) // ROOM_HIST_STEP)
+                bins[k] = max(bins.get(k, 0.0), v)
+            n_bins = int(ROOM_HIST_S // ROOM_HIST_STEP)
+            hist = [round(bins.get(k, 0.0), 2) for k in range(n_bins - 1, -1, -1)]
+            last = self._room_last_motion.get(lab)
+            rooms.append({
+                "name": lab, "motion": round(m, 2),
+                "state": "движение" if m >= ROOM_MOTION_ON else "слабое" if m >= 0.15 else "тихо",
+                "source": "board" if lab in local else "estimate",
+                "quiet_s": None if last is None else round(now - last, 1),
+                "breath_bpm": round(breath[lab]) if lab in breath else None,
+                "hist": hist,
+            })
+        return {"type": "rooms", "t": now, "rooms": rooms, "boards": board_room}
 
     def reset(self) -> None:
         """Forget the position (wrong after a stuck estimate): uniform belief, waiting for movement again."""

@@ -414,7 +414,8 @@ def create_app(
             return FileResponse(ui_dir / rel, media_type="text/html")
         return handler
 
-    app.get("/")(page("scene/index.html"))
+    app.get("/")(page("home/index.html"))
+    app.get("/scene3d")(page("scene/index.html"))
     app.get("/device")(page("device/index.html"))
     app.get("/capture")(page("capture/index.html"))
     app.get("/capture/probe")(page("capture/probe.html"))

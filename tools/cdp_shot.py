@@ -19,6 +19,8 @@ async def main() -> None:
     ap.add_argument("--port", type=int, default=9222)
     ap.add_argument("--wait", type=float, default=8.0)
     ap.add_argument("--ids", default="personBox")
+    ap.add_argument("--size", default="1280x800", help="WxH; mobile e.g. 390x844")
+    ap.add_argument("--dark", action="store_true")
     a = ap.parse_args()
     req = urllib.request.Request(f"http://127.0.0.1:{a.port}/json/new?about:blank", method="PUT")
     tab = json.loads(urllib.request.urlopen(req).read())
@@ -42,7 +44,9 @@ async def main() -> None:
 
         await call("Runtime.enable")
         await call("Page.enable")
-        await call("Emulation.setDeviceMetricsOverride", width=1280, height=800, deviceScaleFactor=1, mobile=False)
+        w, h = (int(v) for v in a.size.split("x"))
+        await call("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=1, mobile=w < 600)
+        await call("Emulation.setEmulatedMedia", features=[{"name": "prefers-color-scheme", "value": "dark" if a.dark else "light"}])
         await call("Page.navigate", url=a.url)
         end = asyncio.get_event_loop().time() + a.wait
         while asyncio.get_event_loop().time() < end:

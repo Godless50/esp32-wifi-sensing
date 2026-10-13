@@ -22,6 +22,8 @@ def stack(tmp_path):
     (ui / "capture" / "index.html").write_text("<!doctype html><title>capture</title>")
     (ui / "scene").mkdir()
     (ui / "scene" / "index.html").write_text("<!doctype html><title>scene</title>")
+    (ui / "home").mkdir()
+    (ui / "home" / "index.html").write_text("<!doctype html><title>home</title>")
     (ui / "data").mkdir()
     (ui / "data" / "index.html").write_text("<!doctype html><title>data</title>")
     ks = KeyStore(tmp_path / "k.json")
@@ -56,7 +58,7 @@ async def test_device_page(stack):
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
 
 
-@pytest.mark.parametrize("url,marker", [("/capture", "capture"), ("/", "scene"), ("/data", "data")])
+@pytest.mark.parametrize("url,marker", [("/capture", "capture"), ("/", "home"), ("/scene3d", "scene"), ("/data", "data")])
 async def test_pages(stack, url, marker):
     _, _, app = stack
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:

@@ -26,8 +26,9 @@ def pred(t, pa, moving=0.9, source="board", links_live=8, dev="d1"):
 
 
 def tracker(state_path=None):
-    out = []
-    tr = PersonTracker(publish=out.append, state_path=state_path)
+    out, rooms = [], []  # сообщения "person" и "rooms" отдельно
+    tr = PersonTracker(publish=lambda m: (out if m["type"] == "person" else rooms).append(m), state_path=state_path)
+    tr.rooms_out = rooms
     assert tr.set_plan(PLAN)
     return tr, out
 
@@ -162,7 +163,7 @@ async def test_hub_listener_publishes_person():
     kinds = []
     while not sub.queue.empty():
         kinds.append(sub.queue.get_nowait()["type"])
-    assert kinds == ["pred", "person"]
+    assert kinds == ["pred", "person", "rooms"]
 
 
 def test_entrance_door_is_found():
@@ -238,3 +239,28 @@ def test_reset_forgets_a_stuck_position(tmp_path):
     assert not p.exists() and tr.xy is None and np.allclose(tr.belief, 1.0 / tr.grid.n)
     tr.on_message(pred(100.0, pa=0.5, moving=0.02))
     assert out[-1]["status"] == "ждём движения"
+
+
+def test_rooms_light_up_where_a_board_sees_motion_close_by():
+    tr, out = tracker()
+    t = 0.0
+    macs = [f"aa:00:00:00:01:{i:02x}" for i in range(4)]  # 4 линии платы d2 (она стоит в A, у y = 2.5)
+    for k in range(60):
+        for m in macs:
+            tr.on_message({"type": "motion", "device_id": "d2", "src": m, "t": t, "raw": 1.0 + 0.05 * (k % 3)})
+        tr.on_message(pred(t, pa=0.5, moving=0.05))
+        t += 0.25
+    rooms = tr.rooms_out
+    assert rooms and all(r["state"] == "тихо" for r in rooms[-1]["rooms"])
+    for k in range(20):  # человек у платы d2: возмущены все её линии
+        for m in macs:
+            tr.on_message({"type": "motion", "device_id": "d2", "src": m, "t": t, "raw": 6.0})
+        tr.on_message(pred(t, pa=0.5, moving=0.9))
+        t += 0.25
+    last = {r["name"]: r for r in tr.rooms_out[-1]["rooms"]}
+    assert last["A"]["state"] == "движение" and last["A"]["source"] == "board" and last["A"]["quiet_s"] == 0.0
+    assert len(last["A"]["hist"]) == 120 and last["A"]["hist"][-1] > 0.35
+    tr.on_message({"type": "breath", "device_id": "d1", "src": "aa:00:00:00:00:01", "t": t, "bpm": 15.2, "ok": True})
+    tr.on_message(pred(t + 1.0, pa=0.5, moving=0.9))
+    last = {r["name"]: r for r in tr.rooms_out[-1]["rooms"]}
+    assert last["A"]["breath_bpm"] == 15  # передатчик линии стоит в A
