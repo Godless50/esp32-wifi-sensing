@@ -61,11 +61,12 @@ class ModelPusher:
         if blob[:4] != b"WSNM" or len(blob) < 128:
             raise ValueError("not a model blob")
         cur = self.pushes.get(device_id)
-        if cur and cur.state in ("starting", "sending"):
+        if cur and cur.state in ("starting", "sending", "activating"):
             raise RuntimeError("push already running")
+        loop = asyncio.get_running_loop()  # вызывать из цикла событий сервера (иначе RuntimeError до записи состояния)
         st = PushState(device_id, struct.unpack_from("<I", blob, 4)[0], len(blob))
         self.pushes[device_id] = st
-        asyncio.get_running_loop().create_task(self._run(st, blob))
+        loop.create_task(self._run(st, blob))
         return st
 
     async def _run(self, st: PushState, blob: bytes) -> None:

@@ -273,7 +273,7 @@ def create_app(
         return {"ok": True}
 
     @app.post("/api/model/push")
-    def model_push(req: ModelPushReq) -> dict:
+    async def model_push(req: ModelPushReq) -> dict:  # async: отправка идёт задачей в цикле событий сервера
         """Send data/ml/<file> (board model blob) to one board, or to every board seen in the last 10 s."""
         if pusher is None or store is None:
             raise HTTPException(503, "model push disabled")
