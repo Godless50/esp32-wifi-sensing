@@ -278,6 +278,13 @@ function onBreath(m) {
   planGroup.add(l.sprite);
 }
 
+let pred = null;  // последний ответ модели (learner): зона, действие, уверенность
+const ZONE_P_MIN = 0.5, MOVE_P_MIN = 0.5;
+
+function onPred(m) {
+  pred = { ...m, seen: performance.now() };
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/live`);
@@ -286,6 +293,7 @@ function connect() {
     const m = JSON.parse(ev.data);
     if (m.type === "motion") onMotion(m);
     else if (m.type === "breath") onBreath(m);
+    else if (m.type === "pred") onPred(m);
     else if (m.type === "phone") {
       phone.position.copy(v3(m.xy[0], m.xy[1], 1.2));
       phone.visible = true;
@@ -323,13 +331,27 @@ renderer.setAnimationLoop((t) => {
     act.set(l.zone, Math.max(act.get(l.zone) || 0, l.energy));
   }
   let best = null;
+  const live = pred && now - pred.seen < 3000;
+  const moving = live && pred.moving_p >= MOVE_P_MIN;
   for (const [name, mat] of floors) {
+    if (live) {  // модель: подсвечиваем её зону, если кто-то движется и она уверена
+      const k = moving && name === pred.zone ? Math.max(0, Math.min(1, (pred.zone_p - 0.3) / 0.5)) : 0;
+      mat.emissive?.setRGB(0.1 * k, 0.35 * k, 0.9 * k);
+      continue;
+    }
     const e = act.get(name) || 0;
     const k = Math.max(0, Math.min(1, (e - 1.4) / 2.0));
     mat.emissive?.setRGB(0.9 * k, 0.45 * k, 0.1 * k);
     if (e >= 1.6 && (!best || e > best[1])) best = [name, e];
   }
-  where.textContent = act.size ? (best ? `· похоже: ${best[0]}` : "· тихо") : "";
+  if (live) {
+    const pct = (x) => `${Math.round(100 * x)}%`;
+    where.textContent = moving
+      ? `· модель ${pred.model}: ${pred.zone_p >= ZONE_P_MIN ? pred.zone : "где-то"} ${pct(pred.zone_p)}, ${pred.activity} ${pct(pred.activity_p)}`
+      : `· модель ${pred.model}: тихо (${pct(1 - pred.moving_p)})`;
+  } else {
+    where.textContent = act.size ? (best ? `· похоже: ${best[0]}` : "· тихо") : "";
+  }
   const br = [];
   for (const l of links.values()) {
     if (l.breath && now - l.breath.t > BREATH_FRESH_MS) dropBreath(l);

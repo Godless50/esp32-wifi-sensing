@@ -11,6 +11,7 @@ from .ingest import IngestService
 from .keys import KeyStore
 from .pinger import Pinger, PingerConfig
 from .live import LiveHub
+from .mirror import DatagramMirror
 from .recorder import Recorder
 from .store import Store
 
@@ -25,7 +26,14 @@ def main() -> None:
     hub = LiveHub()
     store = Store(data / "wsn.db", data / "sessions")
     recorder = Recorder(store)
-    ingest = IngestService(keys, hub.on_packet, state_path=data / "boot_state.json", on_raw=recorder.on_datagram)
+    (data / "run").mkdir(exist_ok=True)
+    mirror = DatagramMirror(data / "run" / "csi.sock")  # копия потока для живого распознавания на хосте
+
+    def on_raw(buf: bytes, device_id: str, recv_t: float) -> None:
+        recorder.on_datagram(buf, device_id, recv_t)
+        mirror.send(buf)
+
+    ingest = IngestService(keys, hub.on_packet, state_path=data / "boot_state.json", on_raw=on_raw)
     def default_device() -> str | None:
         """The board that streamed most recently (within 10 s): the one a phone session records."""
         live = [d for d in hub.devices() if d.age_s < 10]

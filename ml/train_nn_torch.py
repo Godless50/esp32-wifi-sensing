@@ -42,12 +42,16 @@ class Net(nn.Module):
         return self.act(h), self.zone(e.reshape(B, -1)), self.move(h)[:, 0]
 
 
-def fit(Xtr, ya, yz, ym, epochs, seed, bs=64, init_enc=None, enc_lr=0.3):
-    """init_enc: state_dict of a pretrained link encoder (pretrain_ext.py); it then learns at enc_lr x the base rate."""
+def fit(Xtr, ya, yz, ym, epochs, seed, bs=64, init_enc=None, enc_lr=0.3, init_state=None, lr=2e-3):
+    """init_enc: state_dict of a pretrained link encoder (pretrain_ext.py); it then learns at enc_lr x the base rate.
+    init_state: a whole trained Net to continue from (online updates, usually with a smaller lr)."""
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
     net = Net(Xtr.shape[1], Xtr.shape[3]).to(DEV)
-    if init_enc is not None:
+    if init_state is not None:
+        net.load_state_dict(init_state)
+        opt = torch.optim.AdamW(net.parameters(), lr, weight_decay=1e-3)
+    elif init_enc is not None:
         net.enc.load_state_dict(init_enc)
         rest = [p for n, p in net.named_parameters() if not n.startswith("enc.")]
         opt = torch.optim.AdamW([{"params": net.enc.parameters(), "lr": 2e-3 * enc_lr}, {"params": rest}], 2e-3, weight_decay=1e-3)

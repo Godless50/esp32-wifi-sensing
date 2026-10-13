@@ -133,3 +133,15 @@ async def test_scenario_labels(rig, tmp_path):
     evs = [json.loads(x) for x in (store.session_dir(sid) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     (lab,) = [e for e in evs if e["kind"] == "occupancy"]
     assert lab["script"] is True and lab["subject"] == {"zone": "кухня", "act": "машет", "place": "у плиты"}
+
+
+
+async def test_prediction_is_published_live(rig):
+    store, _, _, app = rig
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        ok = await c.post("/api/predict", json={"device_id": DEV, "zone": "зал", "zone_p": 0.7, "activity": "ходит",
+                                                "activity_p": 0.6, "moving_p": 0.9, "model": "v1"})
+        assert ok.status_code == 200
+        bad = await c.post("/api/predict", json={"device_id": DEV, "zone": "зал", "zone_p": 2, "activity": "x",
+                                                 "activity_p": 0.1, "moving_p": 0.1})
+        assert bad.status_code == 422

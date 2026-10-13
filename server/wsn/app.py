@@ -51,6 +51,18 @@ class OccupancyLabel(BaseModel):
     subject: SubjectLabel | None = None
 
 
+class Prediction(BaseModel):
+    """Live model output posted by ml/learner.py; forwarded to /ws/live as {"type": "pred", ...}."""
+    device_id: str = Field(max_length=32)
+    zone: str = Field(max_length=20)
+    zone_p: float = Field(ge=0, le=1)
+    activity: str = Field(max_length=20)
+    activity_p: float = Field(ge=0, le=1)
+    moving_p: float = Field(ge=0, le=1)
+    probs: dict[str, float] = Field(default_factory=dict)
+    model: str = Field(default="", max_length=40)
+
+
 class StartSession(BaseModel):
     kind: str
     device_id: str
@@ -161,6 +173,11 @@ def create_app(
             ev["subject"] = req.subject.model_dump()
         st.append_event(ev)
         return {"session": s.id}
+
+    @app.post("/api/predict")
+    def add_prediction(req: Prediction) -> dict:
+        hub.publish({"type": "pred", "t": time.monotonic(), **req.model_dump()})
+        return {"ok": True}
 
     @app.post("/api/sessions/{sid}/stop")
     def stop_session(sid: str) -> dict:

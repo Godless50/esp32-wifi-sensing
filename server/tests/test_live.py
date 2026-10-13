@@ -248,3 +248,17 @@ def test_motion_energy_normalize_removes_gain_jumps():
     a = base[None] * gains
     assert motion_energy(a) > 1.0
     assert motion_energy(a, normalize=True) < 1e-3
+
+
+
+def test_mirror_delivers_and_never_raises(tmp_path):
+    import socket
+    from wsn.mirror import DatagramMirror
+    m = DatagramMirror(tmp_path / "csi.sock")
+    m.send(b"nobody listens")  # нет слушателя — тихо отбрасываем
+    assert m.dropped == 1
+    rx = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    rx.bind(str(tmp_path / "csi.sock"))
+    m.send(b"pkt")
+    assert rx.recv(64) == b"pkt" and m.sent == 1
+    rx.close(); m.close()
