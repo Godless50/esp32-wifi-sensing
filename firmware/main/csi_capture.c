@@ -108,7 +108,8 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info)
     portEXIT_CRITICAL(&s_mux);
 }
 
-esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const uint8_t (*links)[6], size_t n_links)
+esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const uint8_t (*links)[6], size_t n_links,
+                            bool promisc)
 {
     memcpy(s_bssid, bssid, 6);
     memcpy(s_tx[0], bssid, 6);
@@ -131,7 +132,8 @@ esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const ui
     ESP_ERROR_CHECK(esp_wifi_set_csi_config(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(csi_cb, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
-    if (s_tx_n > 1) { /* чужие кадры (ответы устройств на пинг сервера) видны только в promiscuous */
+    if (s_tx_n > 1 && !promisc) ESP_LOGW(TAG, "promiscuous off: only the access point and ESP-NOW frames of other boards");
+    if (s_tx_n > 1 && promisc) { /* чужие кадры (ответы устройств на пинг сервера) видны только в promiscuous */
         /* Только одиночные кадры данных (MPDU): ответы устройств на пинг. Склеенные кадры (A-MPDU — чужие загрузки,
          * видео) через путь прослушивания роняли все платы разом (13.10: паника в wDev_SnifferRxData, cache error). */
         wifi_promiscuous_filter_t f = {.filter_mask = WIFI_PROMIS_FILTER_MASK_DATA_MPDU};

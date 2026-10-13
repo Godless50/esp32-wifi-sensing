@@ -19,6 +19,8 @@ esp_err_t settings_load(wsn_settings_t *out)
     out->port = 5005;
     out->ping_hz = 100;
     out->csi_source = 0;
+    out->promisc = 1;     /* как было: прослушивание включено, пока сервер не скажет иначе */
+    out->beacon_hz = 50;
     nvs_handle_t h;
     esp_err_t err = nvs_open(NS, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK; /* first boot */
@@ -36,6 +38,8 @@ esp_err_t settings_load(wsn_settings_t *out)
     nvs_get_u16(h, "port", &out->port);
     nvs_get_u16(h, "ping_hz", &out->ping_hz);
     nvs_get_u8(h, "csi_src", &out->csi_source);
+    nvs_get_u8(h, "promisc", &out->promisc);
+    nvs_get_u8(h, "beacon_hz", &out->beacon_hz);
     len = sizeof(out->links);
     if (nvs_get_blob(h, "links", out->links, &len) == ESP_OK) out->n_links = (uint8_t)(len / 6);
     nvs_close(h);
@@ -55,6 +59,8 @@ esp_err_t settings_save(const wsn_settings_t *s)
     if (!err) err = nvs_set_u16(h, "port", s->port);
     if (!err) err = nvs_set_u16(h, "ping_hz", s->ping_hz);
     if (!err) err = nvs_set_u8(h, "csi_src", s->csi_source);
+    if (!err) err = nvs_set_u8(h, "promisc", s->promisc);
+    if (!err) err = nvs_set_u8(h, "beacon_hz", s->beacon_hz);
     if (!err && s->n_links) err = nvs_set_blob(h, "links", s->links, (size_t)s->n_links * 6);
     if (!err && !s->n_links) {
         esp_err_t e = nvs_erase_key(h, "links");

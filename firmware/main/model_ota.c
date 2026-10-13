@@ -127,7 +127,9 @@ static void ota_task(void *arg)
             received = end;
             if (received < total) { set_state(ver, received, WSN_OTA_RECEIVING, 0); continue; }
             uint8_t n = cfg_buf[4];
-            if (memcmp(cfg_buf, "WSNC", 4) != 0 || n > WSN_MAX_LINKS || total != 5u + 6u * n) {
+            /* "WSNC" | n | n x MAC [| promisc 0/1 | beacon_hz] */
+            if (memcmp(cfg_buf, "WSNC", 4) != 0 || n > WSN_MAX_LINKS ||
+                (total != 5u + 6u * n && total != 7u + 6u * n)) {
                 set_state(ver, received, WSN_OTA_ERROR, 12);
                 ver = 0;
                 continue;
@@ -137,6 +139,10 @@ static void ota_task(void *arg)
             st.n_links = n;
             memset(st.links, 0, sizeof(st.links));
             memcpy(st.links, cfg_buf + 5, 6u * n);
+            if (total == 7u + 6u * n) {
+                st.promisc = cfg_buf[5 + 6 * n] ? 1 : 0;
+                st.beacon_hz = cfg_buf[6 + 6 * n];
+            }
             csi_capture_pause();  /* запись в NVS */
             esp_err_t err = settings_save(&st);
             if (err != ESP_OK) { ota_fail(ver, received, 14); ver = 0; continue; }

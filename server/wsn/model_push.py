@@ -31,8 +31,9 @@ FW_FLAG = 0x80000000
 CFG_MASK = 0xC0000000
 
 
-def links_blob(macs: list[str]) -> bytes:
-    """Settings blob for the board: extra transmitters (at most 14)."""
+def links_blob(macs: list[str], promisc: bool | None = None, beacon_hz: int = 50) -> bytes:
+    """Settings blob for the board: extra transmitters (at most 14) and, optionally, whether to sniff the air for
+    them (promiscuous mode crashes the Wi-Fi library) and the rate of its own ESP-NOW broadcasts."""
     if len(macs) > 14:
         raise ValueError("at most 14 extra transmitters")
     out = bytearray(b"WSNC") + bytes([len(macs)])
@@ -41,6 +42,8 @@ def links_blob(macs: list[str]) -> bytes:
         if len(b) != 6:
             raise ValueError(f"bad MAC {m}")
         out += b
+    if promisc is not None:
+        out += bytes([1 if promisc else 0, max(0, min(100, int(beacon_hz)))])
     return bytes(out)
 APP_DESC_MAGIC = b"\x32\x54\xcd\xab"  # esp_app_desc_t, сразу после заголовков образа (смещение 0x20)
 
@@ -94,7 +97,7 @@ class ModelPusher:
     def start(self, device_id: str, blob: bytes) -> PushState:
         fw = firmware_id(blob)
         cfg = blob[:4] == b"WSNC"
-        if cfg and (len(blob) < 5 or len(blob) != 5 + 6 * blob[4]):
+        if cfg and (len(blob) < 5 or len(blob) not in (5 + 6 * blob[4], 7 + 6 * blob[4])):
             raise ValueError("bad settings blob")
         if fw is None and not cfg and (blob[:4] != b"WSNM" or len(blob) < 128):
             raise ValueError("neither a model blob, a firmware image nor a settings blob")

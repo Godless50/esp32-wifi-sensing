@@ -21,6 +21,8 @@ typedef struct {
     uint8_t csi_source; /* 0 = ht, 1 = lltf */
     uint8_t n_links;    /* extra transmitters whose CSI is forwarded (promiscuous mode) */
     uint8_t links[WSN_MAX_LINKS][6];
+    uint8_t promisc;    /* 1 = прослушивание эфира для чужих передатчиков (роняет библиотеку Wi-Fi), 0 = нет */
+    uint8_t beacon_hz;  /* широковещательные кадры ESP-NOW для линий плата -> плата (0 = нет) */
 } wsn_settings_t;
 
 /* Missing fields get defaults: port=5005, ping_hz=100, csi_source=0. */

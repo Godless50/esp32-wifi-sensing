@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "console_cmds.h"
 #include "csi_capture.h"
+#include "espnow_beacon.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -159,6 +160,10 @@ static void on_link(bool up)
 {
     esp_ip4_addr_t gw;
     if (up) fw_confirm();
+    if (up && s_settings.beacon_hz) {
+        esp_err_t e = espnow_beacon_start(s_settings.beacon_hz);
+        if (e != ESP_OK) ESP_LOGW(TAG, "ESP-NOW beacon: %s", esp_err_to_name(e));
+    }
     if (up && wifi_mgr_gateway(&gw)) {
         ping_gen_start(gw, s_settings.ping_hz);
     } else {
@@ -204,7 +209,8 @@ void app_main(void)
     warn_if(err, "wifi start");
     if (complete && err == ESP_OK && boot_id != 0) {
         wsn_flash_quiet = true;
-        err = csi_capture_start(s_settings.bssid, s_settings.csi_source, s_settings.links, s_settings.n_links);
+        err = csi_capture_start(s_settings.bssid, s_settings.csi_source, s_settings.links, s_settings.n_links,
+                                s_settings.promisc != 0);
         warn_if(err, "csi capture");
         if (err == ESP_OK) warn_if(uplink_start(&s_settings, boot_id), "uplink");
         if (err == ESP_OK) warn_if(model_ota_start(), "model OTA");

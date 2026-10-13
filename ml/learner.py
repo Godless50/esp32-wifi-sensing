@@ -244,7 +244,9 @@ class Learner:
                 "activity": meta["activities"][ai], "activity_p": round(float(pa[0, ai]), 3),
                 "moving_p": round(float(pm[0]), 3),
                 "probs": {z: round(float(p), 3) for z, p in zip(meta["zones"], pz[0])},
-                "model": f"v{meta['version']}"}
+                "model": f"v{meta['version']}",
+                # живые линии модели в окне: без них ответ — шум (трекер отбрасывает при < 4)
+                "links_live": int((np.abs(X).sum(axis=(1, 2)) > 0).sum())}
         if self.extras is not None:
             try:
                 body.update(extras_body(*self.extras, X))

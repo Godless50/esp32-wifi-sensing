@@ -72,6 +72,7 @@ class Prediction(BaseModel):
     moving_p: float = Field(ge=0, le=1)
     probs: dict[str, float] = Field(default_factory=dict)
     model: str = Field(default="", max_length=40)
+    links_live: int | None = Field(default=None, ge=0, le=64)  # живые линии модели в окне (трекер: < 4 — шум)
     # многоголовая модель (ml/train_multi.py): сколько людей двигается, по зонам, поза одного человека
     people_probs: list[float] | None = Field(default=None, max_length=8)  # 0..5 человек
     counts_probs: dict[str, list[float]] | None = None

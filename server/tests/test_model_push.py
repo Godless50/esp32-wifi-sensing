@@ -110,3 +110,16 @@ def test_settings_blob_and_push_done_when_the_board_activates():
         assert st.state == "done"
 
     asyncio.run(go())
+
+
+def test_settings_blob_with_promiscuous_flag_and_beacon_rate():
+    from wsn.model_push import links_blob
+    b = links_blob(["02:00:00:00:c9:04"], promisc=False, beacon_hz=50)
+    assert b == b"WSNC\x01" + bytes.fromhex("02000000c904") + b"\x00\x32"
+
+    async def go():
+        p = ModelPusher({DEV: bytes(32)}, FakeIngest())
+        p.transport = FakeTransport()
+        assert p.start(DEV, b).kind == "settings"
+
+    asyncio.run(go())

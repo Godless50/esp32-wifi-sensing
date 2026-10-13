@@ -276,10 +276,14 @@ def test_board_room_is_occupied_only_when_its_board_is_disturbed_more_than_the_o
     tr._board_act = {"d1": (now, 0.12), "d2": (now, 0.05), "d3": (now, 0.04)}
     loc = tr._board_local(now)
     assert loc["A"][1] and not loc["B"][1]
-    # движение где-то задевает все платы одинаково: никого «рядом» нет
-    tr._board_act = {"d1": (now, 0.10), "d2": (now, 0.10), "d3": (now, 0.09)}
+    # движение где-то задевает все платы одинаково и слабо: никого «рядом» нет
+    tr._board_act = {"d1": (now, 0.08), "d2": (now, 0.08), "d3": (now, 0.07)}
     loc = tr._board_local(now)
     assert not loc["A"][1] and not loc["B"][1]
+    # люди у всех плат сразу: медиана высокая, но абсолютный уровень говорит «здесь кто-то есть»
+    tr._board_act = {"d1": (now, 0.15), "d2": (now, 0.14), "d3": (now, 0.16)}
+    loc = tr._board_local(now)
+    assert loc["A"][1] and loc["B"][1]
     # слишком слабо — шум, даже если выше остальных
     tr._board_act = {"d1": (now, 0.04), "d2": (now, 0.0), "d3": (now, 0.0)}
     assert not tr._board_local(now)["A"][1]
