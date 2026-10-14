@@ -165,6 +165,7 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
     override fun onDestroy() {
         super.onDestroy()
+        main.removeCallbacksAndMessages(null)  // циклы опроса и сценария не держат закрытый экран
         transport?.close()
         session?.close()
         session = null

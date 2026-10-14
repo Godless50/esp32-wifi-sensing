@@ -27,8 +27,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-"${COMPOSE[@]}" ps --status running api 2>/dev/null | grep -q api \
-  || { echo "сервер не запущен: ./install.sh" >&2; exit 1; }
+RUNNING=$("${COMPOSE[@]}" ps --status running --services 2>/dev/null || true)
+grep -qx api <<<"$RUNNING" || { echo "сервер не запущен: ./install.sh" >&2; exit 1; }
 MODEL=$("${COMPOSE[@]}" exec -T api python -c "import json, urllib.request
 m = json.load(urllib.request.urlopen('http://127.0.0.1:8080/api/model'))['model'] or {}
 print(m.get('version') or 0, ','.join(m.get('links_now') or []))")

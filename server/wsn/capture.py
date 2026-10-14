@@ -81,6 +81,8 @@ class CaptureProtocol:
         if kind == "hello":
             return [self.state(cid), self._ack(c)]
         if kind == "ping":
+            if self._owns(cid):  # телефон на связи (поз может не быть: лежит в кармане) — запись жива
+                self.recorder.note_activity(self.now())
             return [{"type": "pong", "c0": msg.get("c0"), "s": self.now()}]
         if kind == "sync":
             try:

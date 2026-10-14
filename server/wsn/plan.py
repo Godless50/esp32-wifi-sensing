@@ -41,10 +41,11 @@ def device_marks(events: list[dict]) -> dict[str, dict]:
 
 
 def frame_marks(events: list[dict]) -> tuple[dict | None, dict | None]:
-    """Marks that fix the plan axes: the origin is the "origin" mark or the first marked board; the x axis points to
-    the "router" mark, else to the first marked access point (or the next board) far enough from the origin."""
+    """Marks that fix the plan axes: the origin is the "origin" mark or the marked board with the smallest MAC; the
+    x axis points to the "router" mark, else to the access point (or the next board, by MAC) far enough away."""
     origin, router = _last(events, "origin"), _last(events, "router")
-    marks = list(device_marks(events).values())
+    # по MAC, а не по порядку отметок: любой обход с теми же устройствами даёт те же оси (планы совпадают)
+    marks = sorted(device_marks(events).values(), key=lambda e: str(e["mac"]).lower())
     boards = [e for e in marks if e.get("role") == "board"]
     if origin is None and boards:
         origin = boards[0]

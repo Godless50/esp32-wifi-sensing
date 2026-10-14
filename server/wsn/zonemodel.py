@@ -5,9 +5,11 @@ inside the server, every second. Training and live use the same code below, so t
 trained on:
   FrameFeed (live.py)  CSI frames -> (link, capture time on the server clock, amplitude of 64 subcarriers);
   link_stats           one link, one window of WIN_S: motion statistics of the AGC-normalised amplitude;
-  LinkFloors           every statistic relative to the link's own quiet level (low percentile over FLOOR_S, past
-                       only). The radio background drifts (14.10: a threshold fitted on one half of an empty flat
-                       did not hold on the other half); the ratio to the recent quiet level drifts much less;
+  QuietLevels          every statistic relative to the link's level when nobody is home (from the recording's
+                       "leave the flat" steps, kept in the model, live it follows slow drift only while the model
+                       is sure the flat is empty). The radio background drifts (14.10: a threshold fitted on one
+                       half of an empty flat did not hold on the other half);
+  standardize          live links standardised per link, a silent link is all zeros + alive = 0;
   Ensemble             K small MLPs (numpy forward): softmax over the rooms + EMPTY, sigmoid "somebody moves".
 """
 
@@ -34,7 +36,7 @@ BIN_S = 0.25
 MIN_FRAMES = 8
 MIN_LIVE_SC = 8
 NULL_AMP = 1.0
-FLOOR_S, FLOOR_Q, FLOOR_MIN_N = 3600.0, 10.0, 300  # тихий уровень: 10-й перцентиль за час (не меньше 5 мин)
+FLOOR_Q = 10.0  # без окон «никого нет»: тихий уровень — 10-й перцентиль всех окон записи
 STATS = ("e", "e_last", "jit", "dev")
 FEATURES = ("log_e_rel", "log_e_last_rel", "log_jit_rel", "log_dev_rel", "log_e", "alive")
 NF = len(FEATURES)
@@ -87,53 +89,73 @@ def link_stats(t: np.ndarray, A: np.ndarray, t0: float, t1: float) -> np.ndarray
     return np.array([e, e_last, jit, dev], dtype=np.float64)
 
 
-class LinkFloors:
-    """Quiet level of every statistic of every link: FLOOR_Q-th percentile over the past FLOOR_S (causal).
+class QuietLevels:
+    """Quiet level of every link: its statistics when nobody is home (one value per statistic, not a history).
 
-    Until a link has FLOOR_MIN_N windows of history its floor comes from `warm` (training: the first minute of the
-    recording; live: the floors saved before a restart) or, without it, from the short history itself.
+    Training takes them from the "nobody home" windows of the recording and stores them in the model, so the
+    relative features mean the same thing in training and live: "how much more the link moves than when the
+    flat is empty". Live, a level follows slow radio drift only while the model is sure nobody is home
+    (adapt(), geometric EMA ~10 min); otherwise it stays as trained.
     """
 
-    def __init__(self, warm: dict[str, np.ndarray] | None = None):
-        self.hist: dict[str, deque] = {}
-        self.warm = {k: np.asarray(v, float) for k, v in (warm or {}).items()}
+    def __init__(self, levels: dict[str, np.ndarray] | None = None):
+        self.levels = {k: np.asarray(v, float) for k, v in (levels or {}).items() if len(v) == len(STATS)}
 
-    def floor(self, link: str) -> np.ndarray | None:
-        q = self.hist.get(link)
-        if q and len(q) >= FLOOR_MIN_N:
-            return np.percentile(np.stack([s for _, s in q]), FLOOR_Q, axis=0)
-        if link in self.warm:
-            return self.warm[link]
-        if q:
-            return np.percentile(np.stack([s for _, s in q]), FLOOR_Q, axis=0)
-        return None
+    def features(self, link: str, st: np.ndarray | None) -> np.ndarray:
+        return link_features(st, self.levels.get(link))
 
-    def features(self, link: str, t: float, st: np.ndarray | None) -> np.ndarray:
-        out = np.zeros(NF)
-        if st is None:
-            return out  # линия молчит: все признаки 0, alive = 0
-        q = self.hist.setdefault(link, deque())
-        q.append((t, st))
-        while q and q[0][0] < t - FLOOR_S:
-            q.popleft()
-        fl = self.floor(link)
-        out[:4] = np.log((st + EPS) / (fl + EPS))
-        out[4] = math.log(st[0] + EPS)
-        out[5] = 1.0
-        return out
+    def adapt(self, link: str, st: np.ndarray | None, rate: float) -> None:
+        if st is not None and link in self.levels:
+            self.levels[link] = np.exp((1 - rate) * np.log(self.levels[link] + EPS) + rate * np.log(st + EPS)) - EPS
 
     def snapshot(self) -> dict[str, list[float]]:
-        return {k: [round(float(v), 6) for v in fl] for k in self.hist if (fl := self.floor(k)) is not None}
+        return {k: [round(float(v), 7) for v in fl] for k, fl in self.levels.items()}
 
 
-def warm_floors(stats: dict[str, list[np.ndarray]]) -> dict[str, np.ndarray]:
-    """Floors from the first FLOOR_MIN_N windows of each link (start of a recording)."""
-    out = {}
-    for link, rows in stats.items():
-        rows = [r for r in rows if r is not None][:FLOOR_MIN_N]
-        if rows:
-            out[link] = np.percentile(np.stack(rows), FLOOR_Q, axis=0)
+def link_features(st: np.ndarray | None, level: np.ndarray | None) -> np.ndarray:
+    """Features of one link in one window; a silent link is all zeros (alive = 0)."""
+    out = np.zeros(NF)
+    if st is None:
+        return out
+    if level is not None:
+        out[:4] = np.log((st + EPS) / (level + EPS))
+    out[4] = math.log(st[0] + EPS)
+    out[5] = 1.0
     return out
+
+
+def quiet_levels(S: np.ndarray, quiet: np.ndarray | None) -> np.ndarray:
+    """S [windows, links, len(STATS)] (nan: silent) -> level per link [links, len(STATS)]: median of the
+    "nobody home" windows when there are enough of them, else FLOOR_Q-th percentile of all windows."""
+    out = np.full((S.shape[1], S.shape[2]), np.nan)
+    for j in range(S.shape[1]):
+        alive = ~np.isnan(S[:, j, 0])
+        q = alive & quiet if quiet is not None else np.zeros_like(alive)
+        if q.sum() >= 30:
+            out[j] = np.median(S[q, j], axis=0)
+        elif alive.sum() >= 10:
+            out[j] = np.percentile(S[alive, j], FLOOR_Q, axis=0)
+    return out
+
+
+def standardize(X: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
+    """X [N, links, NF] -> net input [N, links*NF]. A silent link (alive = 0) is all zeros, a live one is
+    standardised by the statistics of live windows of that link: a dead link never becomes an extreme value."""
+    alive = X[:, :, -1:] > 0.5
+    Zf = np.where(alive, (X[:, :, :-1] - mu[None, :, :-1]) / sd[None, :, :-1], 0.0)
+    return np.concatenate([Zf, alive.astype(float)], axis=2).reshape(len(X), -1)
+
+
+def standardisation(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """mu, sd [links, NF] over the live windows of each link (sd >= 0.05)."""
+    L = X.shape[1]
+    mu, sd = np.zeros((L, NF)), np.ones((L, NF))
+    for j in range(L):
+        a = X[:, j, -1] > 0.5
+        if a.sum() >= 2:
+            mu[j, :-1] = X[a, j, :-1].mean(axis=0)
+            sd[j, :-1] = np.maximum(X[a, j, :-1].std(axis=0), 0.05)
+    return mu, sd
 
 
 def _relu(x: np.ndarray) -> np.ndarray:
@@ -157,7 +179,7 @@ def sigmoid(x: np.ndarray) -> np.ndarray:
 
 
 class Ensemble:
-    """Trained model: meta.json (links, zones, metrics) + model.npz (standardisation, K nets)."""
+    """Trained model: meta.json (links, zones, quiet levels, metrics) + model.npz (standardisation, K nets)."""
 
     def __init__(self, meta: dict, arrays: dict[str, np.ndarray]):
         self.meta = meta
@@ -167,12 +189,15 @@ class Ensemble:
         self.mu = np.asarray(arrays["mu"], float)
         self.sd = np.asarray(arrays["sd"], float)
         self.nets = [{k: np.asarray(arrays[f"n{i}_{k}"], float) for k in NET_KEYS} for i in range(int(meta["nets"]))]
-        if self.mu.shape != (len(self.links) * NF,) or not self.nets:
+        if self.mu.shape != (len(self.links), NF) or self.sd.shape != self.mu.shape or not self.nets:
             raise ValueError("model arrays do not match its links")
+
+    def levels(self) -> dict[str, np.ndarray]:
+        return {k: np.asarray(v, float) for k, v in (self.meta.get("quiet") or {}).items() if len(v) == len(STATS)}
 
     def predict(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """X [N, links, NF] -> P(zone) [N, zones], P(moving) [N] (mean over the nets)."""
-        Z = (X.reshape(len(X), -1) - self.mu) / self.sd
+        Z = standardize(X, self.mu, self.sd)
         pz, pm = 0.0, 0.0
         for net in self.nets:
             lz, lm, _ = net_forward(net, Z)
@@ -205,15 +230,16 @@ def save_model(model_dir: Path, meta: dict, mu: np.ndarray, sd: np.ndarray, nets
 
 
 RELOAD_EVERY_S = 10.0
-FLOORS_SAVE_S = 60.0
-FLOORS_MAX_AGE_S = 3600.0
+LEVELS_SAVE_S = 60.0
+ADAPT_EMPTY_P, ADAPT_AFTER_S, ADAPT_RATE = 0.9, 60.0, 1.0 / 600  # дрейф фона — только когда точно никого
 
 
 class LiveInfer:
     """The flat's model on live CSI: LiveHub frame listener + tick() every STEP_S from the server loop.
 
-    Picks up a new model (data/model/meta.json) without a restart. The quiet levels of the links are kept even
-    without a model (it starts warm) and are saved, so a restart of the server does not reset them.
+    Picks up a new model (data/model/meta.json) without a restart. Quiet levels start from the model; while the
+    model has said "nobody home" (P >= ADAPT_EMPTY_P) for ADAPT_AFTER_S they follow the radio's slow drift. The
+    adapted levels are saved (state_path) for the same model version, so a restart keeps them.
     """
 
     def __init__(self, model_dir: Path, publish: Callable[[dict], None], state_path: Path | None = None):
@@ -226,29 +252,31 @@ class LiveInfer:
         self._mtime: int | None = None
         self._checked = -1e9
         self._saved = time.monotonic()
+        self._empty_since: float | None = None
         self.buf: dict[str, deque] = {}
-        self.floors = LinkFloors(self._load_floors())
+        self.quiet = QuietLevels()
 
-    def _load_floors(self) -> dict | None:
+    def _load_levels(self, version: int) -> dict | None:
         if self.state_path is None or not self.state_path.exists():
             return None
         try:
             st = json.loads(self.state_path.read_text(encoding="utf-8"))
-            if time.time() - float(st["wall"]) <= FLOORS_MAX_AGE_S:
-                return {k: np.asarray(v, float) for k, v in st["floors"].items() if len(v) == len(STATS)}
+            if int(st.get("version", -1)) == version:
+                return st["levels"]
         except (ValueError, KeyError, TypeError, OSError):
-            log.warning("link floors %s unreadable; starting cold", self.state_path)
+            log.warning("quiet levels %s unreadable; using the model's", self.state_path)
         return None
 
-    def _save_floors(self) -> None:
-        if self.state_path is None:
+    def _save_levels(self) -> None:
+        if self.state_path is None or self.model is None:
             return
         try:
             tmp = self.state_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"wall": time.time(), "floors": self.floors.snapshot()}), encoding="utf-8")
+            tmp.write_text(json.dumps({"version": self.model.version, "wall": time.time(),
+                                       "levels": self.quiet.snapshot()}), encoding="utf-8")
             os.replace(tmp, self.state_path)
         except OSError as e:
-            log.warning("link floors not saved: %s", e)
+            log.warning("quiet levels not saved: %s", e)
 
     def reload(self, now: float) -> bool:
         self._checked = now
@@ -269,9 +297,12 @@ class LiveInfer:
             log.error("room model in %s not loaded: %s", self.model_dir, self.error)
             return False
         self.model, self.error = m, None
-        for lk, fl in (m.meta.get("floors") or {}).items():  # тихий уровень из обучения — пока нет своего
-            if len(fl) == len(STATS):
-                self.floors.warm.setdefault(lk, np.asarray(fl, float))
+        levels = m.levels()
+        saved = self._load_levels(m.version)  # уровни, подстроенные этой же моделью до перезапуска
+        if saved:
+            levels.update({k: np.asarray(v, float) for k, v in saved.items() if k in levels and len(v) == len(STATS)})
+        self.quiet = QuietLevels(levels)
+        self._empty_since = None
         log.info("room model v%d: %d links, zones %s", m.version, len(m.links), m.zones)
         return True
 
@@ -284,50 +315,61 @@ class LiveInfer:
         while q[0][0] < ft - BUF_S:
             q.popleft()
 
-    def window_features(self, links: list[str], t1: float) -> np.ndarray:
-        """Features [len(links), NF] of the window ending at t1; also advances the quiet levels of these links."""
-        X = np.zeros((len(links), NF))
-        for i, lk in enumerate(links):
+    def window_stats(self, links: list[str], t1: float) -> list[np.ndarray | None]:
+        out = []
+        for lk in links:
             q = self.buf.get(lk)
             st = None
             if q:
                 t = np.fromiter((x[0] for x in q), float, len(q))
                 order = np.argsort(t, kind="stable")
                 st = link_stats(t[order], np.stack([q[j][1] for j in order]), t1 - WIN_S, t1)
-            X[i] = self.floors.features(lk, t1, st)
-        return X
+            out.append(st)
+        return out
 
     def tick(self, now: float) -> dict | None:
         if now - self._checked >= RELOAD_EVERY_S:
             self.reload(now)
         m = self.model
-        t1 = now - LAG_S
-        links = list(m.links) if m else []
-        extra = sorted(k for k in self.buf if k not in set(links))  # пол линий копится и без модели
-        X = self.window_features(links + extra, t1)
-        if now - self._saved >= FLOORS_SAVE_S:
-            self._saved = now
-            self._save_floors()
         if m is None:
             return None
-        pz, pm = m.predict(X[None, : len(links)])
+        links = list(m.links)
+        stats = self.window_stats(links, now - LAG_S)
+        X = np.stack([self.quiet.features(lk, st) for lk, st in zip(links, stats)])
+        pz, pm = m.predict(X[None])
         p = pz[0]
         rooms = m.zones[:-1]
         pr = p[:-1] / max(float(p[:-1].sum()), 1e-9)  # где человек, если он есть
         best = int(np.argmax(pr))
         mv = float(pm[0])
+        empty = float(p[-1])
+        if empty >= ADAPT_EMPTY_P:  # долго и уверенно пусто — подстроить тихий уровень под дрейф фона
+            self._empty_since = now if self._empty_since is None else self._empty_since
+            if now - self._empty_since >= ADAPT_AFTER_S:
+                for lk, st in zip(links, stats):
+                    self.quiet.adapt(lk, st, ADAPT_RATE)
+        else:
+            self._empty_since = None
+        if now - self._saved >= LEVELS_SAVE_S:
+            self._saved = now
+            self._save_levels()
         msg = {
             "type": "pred", "source": "model", "device_id": "", "t": now,
             "zone": rooms[best], "zone_p": round(float(pr[best]), 3),
             "probs": {r: round(float(v), 3) for r, v in zip(rooms, pr)},
-            "empty_p": round(float(p[-1]), 3), "moving_p": round(mv, 3),
+            "empty_p": round(empty, 3), "moving_p": round(mv, 3),
             "activity": "ходит" if mv >= 0.5 else "нет движения", "activity_p": round(max(mv, 1 - mv), 3),
-            "links_live": int(X[: len(links), -1].sum()), "links_total": len(links),
+            "links_live": int(X[:, -1].sum()), "links_total": len(links),
             "model": f"квартира v{m.version}",
         }
         self.last = msg
         self.publish(msg)
         return msg
+
+    def links_now(self, within_s: float = 10.0) -> list[str]:
+        """Links with a frame in the last within_s (training takes only recordings on these links)."""
+        now = time.monotonic()
+        return sorted(k for k, q in list(self.buf.items()) if q and q[-1][0] >= now - within_s)
 
     def status(self) -> dict:
         m = self.model
@@ -338,7 +380,5 @@ class LiveInfer:
             "links": m.links if m else None,
             "created": m.meta.get("created") if m else None,
             "metrics": m.meta.get("metrics") if m else None,
-            "links_seen": sorted(self.buf),
-            # линии, по которым кадры идут прямо сейчас: обучение берёт только записи на этих же линиях
-            "links_now": sorted(k for k, q in self.buf.items() if q and q[-1][0] >= time.monotonic() - 10.0),
+            "links_now": self.links_now(),
         }

@@ -419,13 +419,29 @@ def create_app(
         except (OSError, ValueError):
             return None
 
+    def model_status() -> dict | None:
+        """Model state; links_now only of our boards: receiver and transmitter are known boards, or the transmitter
+        is the receiver's access point (a stranger's ESP-NOW beacon on the channel is not a link of this flat)."""
+        if infer is None:
+            return None
+        st = infer.status()
+        boards = {b["mac"]: b for b in board_list() if b["role"] == "board"}
+        known = set(ingest.keys.ids() if hasattr(ingest.keys, "ids") else []) | set(boards)
+
+        def ours(lk: str) -> bool:
+            rx, _, tx = lk.partition("|")
+            return rx in known and (tx in known or tx == (boards.get(rx) or {}).get("ap"))
+        st["links_now"] = [lk for lk in st["links_now"] if ours(lk)]
+        return st
+
+    # async: читают состояние приёма (буферы, статистику плат) в том же цикле событий, где оно меняется
     @app.get("/api/model")
-    def api_model() -> dict:
+    async def api_model() -> dict:
         """The flat's room model (data/model) and the state of the last training (train.sh)."""
-        return {"model": infer.status() if infer is not None else None, "training": train_status()}
+        return {"model": model_status(), "training": train_status()}
 
     @app.get("/api/status")
-    def api_status() -> dict:
+    async def api_status() -> dict:
         """Everything the phone app shows on its home screen: boards, plan, recordings, model."""
         devs = board_list()
         plan = plan_cache["plan"] or (build_plan(store) if store is not None else None)
@@ -442,7 +458,7 @@ def create_app(
             "walks": [{"id": s.id, "started_wall": s.started_wall, "duration_s": round(s.stopped - s.started, 1),
                        "poses": s.poses, "events": s.events, "plan_ok": s.plan_ok} for s in walks[-5:]],
             "recording": dataclasses.asdict(active) if active else None,
-            "model": infer.status() if infer is not None else None,
+            "model": model_status(),
             "training": train_status(),
             "person": person.last,
         }

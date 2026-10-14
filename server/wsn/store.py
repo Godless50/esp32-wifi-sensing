@@ -10,6 +10,7 @@ Only one session is active at a time; append_* calls without an active session a
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import shutil
@@ -89,14 +90,31 @@ class Store:
         rows = self._db.execute("SELECT id, started FROM sessions WHERE stopped IS NULL").fetchall()
         for sid, started in rows:
             d = self.session_dir(sid)
-            csi = len(read_csi_bin(d / "csi.bin")) if (d / "csi.bin").exists() else 0
+            recs = read_csi_bin(d / "csi.bin") if (d / "csi.bin").exists() else []
             poses = self._count_lines(d / "pose.jsonl")
             events = self._count_lines(d / "events.jsonl")
+            # конец — последняя запись, а не начало: прерванный перезапуском сервера обход остаётся пригодным
+            last = max([started, recs[-1][0] if recs else started,
+                        self._last_t(d / "pose.jsonl"), self._last_t(d / "events.jsonl")])
             self._db.execute(
                 "UPDATE sessions SET stopped=?, csi_packets=?, poses=?, events=?, plan_reason=? WHERE id=?",
-                (started, csi, poses, events, "interrupted", sid),
+                (last, len(recs), poses, events, "interrupted", sid),
             )
         self._db.commit()
+
+    @staticmethod
+    def _last_t(p: Path) -> float:
+        """Time of the last complete JSON line (pose / event), -inf when none."""
+        if not p.exists():
+            return -math.inf
+        for line in reversed(p.read_text(encoding="utf-8", errors="replace").splitlines()):
+            try:
+                t = json.loads(line).get("t")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(t, (int, float)):
+                return float(t)
+        return -math.inf
 
     @staticmethod
     def _count_lines(p: Path) -> int:

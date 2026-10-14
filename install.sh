@@ -39,8 +39,10 @@ bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 die() { printf '\n\033[31mОшибка: %s\033[0m\n' "$*" >&2; exit 1; }
-ask() { local a; read -r -p "  $1${2:+ [$2]}: " a </dev/tty; printf '%s' "${a:-${2:-}}"; }
-confirm() { [ "$YES" = 1 ] && return 0; local a; read -r -p "  $1 [Д/н]: " a </dev/tty; [[ -z $a || $a =~ ^[ДдYy] ]]; }
+ask() { local a=""; read -r -p "  $1${2:+ [$2]}: " a </dev/tty || true; printf '%s' "${a:-${2:-}}"; }
+# без терминала (нечем ответить) — «нет»: стирать плату без согласия нельзя
+confirm() { [ "$YES" = 1 ] && return 0; local a; read -r -p "  $1 [Д/н]: " a </dev/tty || return 1; [[ -z $a || $a =~ ^[ДдYy] ]]; }
+secret() { local a=""; IFS= read -r -s -p "  $1" a </dev/tty || true; echo >&2; printf '%s' "$a"; }  # пробелы по краям — часть пароля
 
 # ---------------------------------------------------------------- окружение
 check_prereq() {
@@ -84,7 +86,7 @@ detect_host() {
       echo "  Адреса этого компьютера:"; i=0
       while read -r ip; do i=$((i + 1)); echo "   $i) $ip"; done <<<"$ips"
       i=$(ask "Какой из них в той же сети Wi-Fi, что и платы (номер)" 1)
-      HOST=$(sed -n "${i}p" <<<"$ips")
+      [[ $i =~ ^[0-9]+$ ]] && HOST=$(sed -n "${i}p" <<<"$ips")
     fi
     [ -n "${HOST:-}" ] || HOST=$(ask "Адрес этого компьютера в домашней сети (IP)")
     [ -n "$HOST" ] || die "не задан адрес компьютера"
@@ -104,8 +106,8 @@ set_password() {
   local p1 p2
   bold "Пароль для приложения и веб-интерфейса (пользователь wsn)"
   while :; do
-    read -r -s -p "  Новый пароль (не короче 8 символов): " p1 </dev/tty; echo
-    read -r -s -p "  Ещё раз: " p2 </dev/tty; echo
+    p1=$(secret "Новый пароль (не короче 8 символов): ")
+    p2=$(secret "Ещё раз: ")
     [ "$p1" = "$p2" ] || { warn "не совпадают"; continue; }
     [ ${#p1} -ge 8 ] || { warn "слишком короткий"; continue; }
     break
@@ -166,13 +168,14 @@ flash_one() {
     return 1; }
   mac=$(sed -n 's/^MAC: *//p' <<<"$info" | head -1)
   flash=$(sed -n 's/^Detected flash size: *\([0-9]*\)MB.*/\1/p' <<<"$info" | head -1)
-  psram=no
-  grep -q 'PSRAM' <<<"$(grep '^Features:' <<<"$info")" && psram=yes
-  if [ "$psram" = yes ] && [ "${flash:-0}" -ge 16 ]; then variant=main
+  # main собрана под восьмибитную (octal) PSRAM на 8 МБ (модули N16R8); 2 МБ (R2) — четырёхбитная, ей — lite
+  psram=$(grep '^Features:' <<<"$info" | sed -n 's/.*Embedded PSRAM \([0-9]*\)MB.*/\1/p' | head -1 || true)
+  psram=${psram:-0}
+  if [ "$psram" -ge 8 ] && [ "${flash:-0}" -ge 16 ]; then variant=main
   elif [ "${flash:-0}" -ge 8 ]; then variant=lite
   else warn "$dev ($mac): флеш ${flash:-?} МБ — нужна ESP32-S3 с флешем от 8 МБ"; return 1; fi
   [ -f "$DIST/wsn-$variant.bin" ] || die "нет образа прошивки firmware/dist/wsn-$variant.bin"
-  echo "  плата $mac: флеш ${flash} МБ, PSRAM: $psram -> прошивка $variant"
+  echo "  плата $mac: флеш ${flash} МБ, PSRAM ${psram} МБ -> прошивка $variant"
   confirm "Прошить плату $mac? Всё, что на ней было, будет стёрто" || return 1
   sleep 2  # плата перезапустилась после опроса
   esptool "$dev" --before default_reset --after no_reset -b 460800 write_flash --erase-all 0x0 "/fw/wsn-$variant.bin" \
@@ -223,7 +226,7 @@ setup_wifi() {
     ssid=$(ask "Имя сети Wi-Fi (2,4 ГГц)")
   fi
   [ -n "$ssid" ] || die "не выбрана сеть"
-  read -r -s -p "  Пароль Wi-Fi «$ssid» (уйдёт только в платы): " pw </dev/tty; echo
+  pw=$(secret "Пароль Wi-Fi «$ssid» (уйдёт только в платы): ")
   local args=()
   for i in $ports; do args+=(--port "$(readlink -f "$i")"); done
   set +e

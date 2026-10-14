@@ -72,10 +72,14 @@ class HomeActivity : AppCompatActivity() {
         main.removeCallbacksAndMessages(null)
     }
 
+    private val pollTask = Runnable { poll() }
+
+    /** One polling chain only: a call from a dialog restarts it instead of starting a second one. */
     private fun poll() {
+        main.removeCallbacks(pollTask)
         if (!polling) return
-        if (Server.paired()) Server.getJson("/api/status") { js, err -> render(js, err) } else render(null, null)
-        main.postDelayed({ poll() }, 3000)
+        if (Server.paired()) Server.getJson("/api/status") { js, err -> if (!isDestroyed) render(js, err) } else render(null, null)
+        main.postDelayed(pollTask, 3000)
     }
 
     private fun button(label: String, primary: Boolean, onClick: () -> Unit) = Button(this).apply {
@@ -166,6 +170,7 @@ class HomeActivity : AppCompatActivity() {
     }
 
     private fun toastDialog(msg: String) {
+        if (isFinishing || isDestroyed) return  // ответ сервера пришёл, когда экран уже закрыт
         AlertDialog.Builder(this).setMessage(msg).setPositiveButton("OK", null).show()
     }
 }

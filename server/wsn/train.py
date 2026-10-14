@@ -1,7 +1,8 @@
 """Train the flat's room model from the walk recorded with the phone app (train.sh -> python -m wsn.train).
 
-Data: the newest finished walk session (phone AR poses + CSI of every board, csi_all.bin), plus earlier walks and
-"empty" sessions recorded on the same radio links. Labels come from the phone, not from people's memory:
+Data: the newest finished walk session recorded on the links that are on the air now (phone AR poses + CSI of
+every board, csi_all.bin), plus "empty" sessions on the same links. Earlier walks are not mixed in: each walk has
+its own plan axes (the order of the phone's marks), so their zone labels would not match. Labels come from the phone, not from people's memory:
   * zone   — where the phone (carried by the person) was at the end of the window, in the zones of the plan
              (the same labels as the tracker on the map); outside the plan during an "empty" step of the scenario
              -> EMPTY (nobody home);
@@ -40,8 +41,8 @@ from .plan import build_plan  # noqa: E402
 from .protocol import CSI_TYPES, ProtocolError, parse_packet  # noqa: E402
 from .store import Store, read_csi_bin  # noqa: E402
 from .zonemodel import (  # noqa: E402
-    EMPTY, FEATURES, FLOOR_Q, NF, STATS, STEP_S, WIN_S, LinkFloors, link_id, link_stats, net_forward,
-    save_model, sigmoid, softmax, warm_floors,
+    EMPTY, EPS, FEATURES, NF, STATS, STEP_S, WIN_S, link_id, link_stats, net_forward, quiet_levels, save_model,
+    sigmoid, softmax, standardisation, standardize,
 )
 
 log = logging.getLogger("train")
@@ -128,34 +129,32 @@ def window_ends(rec: Recording) -> np.ndarray:
     return np.arange(rec.t0 + WIN_S + 1.0, rec.t1 - 0.5, STEP_S)
 
 
-def recording_stats(rec: Recording, links: list[str], ends: np.ndarray) -> dict[str, list]:
-    out = {}
-    for lk in links:
+def recording_stats(rec: Recording, links: list[str], ends: np.ndarray) -> np.ndarray:
+    """S [windows, links, len(STATS)]: link_stats of every window; nan where the link was silent."""
+    S = np.full((len(ends), len(links), len(STATS)), np.nan)
+    for j, lk in enumerate(links):
         fr = rec.frames.get(lk)
-        out[lk] = [None if fr is None else link_stats(fr[0], fr[1], te - WIN_S, te) for te in ends]
-    return out
+        if fr is None:
+            continue
+        for i, te in enumerate(ends):
+            st = link_stats(fr[0], fr[1], te - WIN_S, te)
+            if st is not None:
+                S[i, j] = st
+    return S
 
 
-def recording_features(rec: Recording, links: list[str], ends: np.ndarray,
-                       quiet: np.ndarray | None = None) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """X [windows, links, NF]: the same features as LiveInfer computes live, quiet levels in time order.
-
-    Until a link has its own history (FLOOR_MIN_N windows) the quiet level comes from the windows of this
-    recording when nobody was home (`quiet` mask, the "leave the flat" steps) — live, the server has the past
-    hour for that; without such windows — from the start of the recording."""
-    stats = recording_stats(rec, links, ends)
-    warm = warm_floors(stats)
-    if quiet is not None and quiet.sum() >= 30:
-        for lk in links:
-            rows = [s for s, q in zip(stats[lk], quiet) if q and s is not None]
-            if len(rows) >= 30:
-                warm[lk] = np.percentile(np.stack(rows), FLOOR_Q, axis=0)
-    floors = LinkFloors(warm)
-    X = np.zeros((len(ends), len(links), NF))
-    for i, te in enumerate(ends):
-        for j, lk in enumerate(links):
-            X[i, j] = floors.features(lk, float(te), stats[lk][i])
-    return X, warm
+def features_from_stats(S: np.ndarray, levels: np.ndarray) -> np.ndarray:
+    """X [windows, links, NF] from S and quiet levels [links, len(STATS)] (nan: unknown) — elementwise the same
+    as zonemodel.link_features, which LiveInfer uses live."""
+    alive = ~np.isnan(S[:, :, 0])
+    known = ~np.isnan(levels[:, 0])
+    with np.errstate(invalid="ignore"):
+        rel = np.log((S + EPS) / (levels[None] + EPS))
+        X = np.zeros(S.shape[:2] + (NF,))
+        X[:, :, :4] = np.where((alive & known[None])[:, :, None], rel, 0.0)
+        X[:, :, 4] = np.where(alive, np.log(np.where(alive, S[:, :, 0], 1.0) + EPS), 0.0)
+    X[:, :, 5] = alive
+    return X
 
 
 class Labeler:
@@ -272,7 +271,8 @@ def sample_weights(Z: np.ndarray) -> np.ndarray:
 
 def fit_net(X: np.ndarray, Z: np.ndarray, M: np.ndarray, mu: np.ndarray, sd: np.ndarray, seed: int,
             cfg: FitConfig) -> dict:
-    """One MLP (numpy, AdamW). X raw features [N, L, NF]; Z allowed-zone masks [N, K]; M moving 1/0/-1."""
+    """One MLP (numpy, AdamW). X raw features [N, L, NF]; Z allowed-zone masks [N, K]; M moving 1/0/-1;
+    mu, sd [L, NF] from zonemodel.standardisation."""
     rng = np.random.default_rng(seed)
     N, L, _ = X.shape
     D, K = L * NF, Z.shape[1]
@@ -296,7 +296,7 @@ def fit_net(X: np.ndarray, Z: np.ndarray, M: np.ndarray, mu: np.ndarray, sd: np.
             if cfg.link_drop > 0 and L > 1:
                 dead = rng.random((len(idx), L)) < cfg.link_drop
                 xb[dead] = 0.0
-            Zs = (xb.reshape(len(idx), D) - mu) / sd
+            Zs = standardize(xb, mu, sd)  # мёртвая линия -> нули + alive = 0 (как вживую)
             Zs = Zs + rng.normal(0, cfg.noise, Zs.shape)
             a1 = Zs @ net["W1"] + net["b1"]
             r1 = np.maximum(a1, 0)
@@ -330,17 +330,12 @@ def _fit_job(args) -> dict:
 
 
 def predict(nets: list[dict], X: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    Zs = (X.reshape(len(X), -1) - mu) / sd
+    Zs = standardize(X, mu, sd)
     pz, pm = 0.0, 0.0
     for net in nets:
         lz, lm, _ = net_forward(net, Zs)
         pz, pm = pz + softmax(lz), pm + sigmoid(lm)
     return pz / len(nets), pm / len(nets)
-
-
-def standardisation(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    F = X.reshape(len(X), -1)
-    return F.mean(axis=0), np.maximum(F.std(axis=0), 1e-3)
 
 
 def metrics(Z: np.ndarray, M: np.ndarray, pz: np.ndarray, pm: np.ndarray, zones: list[str]) -> dict:
@@ -389,10 +384,6 @@ def cv_folds(rec_idx: np.ndarray, ends: np.ndarray, k: int) -> list[tuple[np.nda
     return out
 
 
-def alive_share(X: np.ndarray) -> np.ndarray:
-    return X[:, :, -1].mean(axis=0) if len(X) else np.zeros(X.shape[1])
-
-
 def pick_sessions(store: Store, plan: dict, explicit: list[str] | None) -> list:
     done = {s.id: s for s in store.list_sessions() if s.stopped is not None}
     if explicit:
@@ -423,7 +414,8 @@ def run(a, status: Status) -> dict:
     lab = Labeler(plan)
     cands = pick_sessions(store, plan, a.sessions.split(",") if a.sessions else None)
     say(f"Зоны плана: {', '.join(lab.zones[:-1])}")
-    recs, links, quiet_floors = [], None, None
+    recs: list[dict] = []
+    links: list[str] | None = None
     live = set(a.live_links.split(",")) - {""} if a.live_links else None  # линии в эфире сейчас (train.sh)
     for n, info in enumerate(cands, 1):
         status.set("running", "load", 0.4 * n / len(cands), f"чтение записи {info.id}")
@@ -434,75 +426,97 @@ def run(a, status: Status) -> dict:
             say("  слишком короткая — пропуск")
             continue
         if links is None:  # самая новая подходящая запись задаёт набор линий
-            share = {lk: float(np.mean([s is not None for s in st]))
-                     for lk, st in recording_stats(rec, sorted(rec.frames), ends).items()
-                     if not lk.endswith("|")}  # кадры без передатчика (старая прошивка) — не линия
-            cand = sorted(lk for lk, v in share.items() if v >= LINK_MIN_SHARE)
+            if info.kind != "walk" and not a.sessions:
+                continue  # набор линий задаёт обход, не «пусто»
+            seen = sorted(lk for lk in rec.frames if not lk.endswith("|"))  # без передатчика (старая прошивка)
+            share = (~np.isnan(recording_stats(rec, seen, ends)[:, :, 0])).mean(axis=0)
+            cand = [lk for lk, v in zip(seen, share) if v >= LINK_MIN_SHARE]
             if live is not None:
                 same = len(set(cand) & live) / max(1, len(live))
                 if same < SAME_LINKS:
                     say(f"  записана на других платах или линиях (совпадает {same:.0%} нынешних) — пропуск")
                     continue
+                cand = [lk for lk in cand if lk in live]  # чужие передатчики (не наши платы) не берём
             if not cand:
                 say("  в записи нет живых линий — пропуск")
                 continue
             links = cand
             say(f"  линий: {len(links)} ({', '.join(links)})")
-        Z, M = lab.labels(rec, ends)
-        X, warm = recording_features(rec, links, ends, quiet=Z[:, lab.E] == 1)
-        if quiet_floors is None:  # тихий уровень новой записи: с него сервер начнёт, пока не накопит свой
-            quiet_floors = {lk: [round(float(v), 6) for v in fl] for lk, fl in warm.items()}
-        alive = alive_share(X)
+        elif info.kind == "walk" and not a.sessions:
+            continue  # прежние обходы — в своей системе координат (порядок отметок), их метки зон не совпадут
+        S = recording_stats(rec, links, ends)
+        alive = (~np.isnan(S[:, :, 0])).mean(axis=0)
         if recs and float((alive >= LINK_MIN_SHARE).mean()) < SAME_LINKS:
             say(f"  другие линии радио (живы {int((alive >= LINK_MIN_SHARE).sum())} из {len(links)}) — пропуск")
             continue
+        Z, M = lab.labels(rec, ends)
         say(f"  окон {len(ends)}: с зоной {int((Z.sum(1) == 1).sum())}, «пусто» {int(Z[:, lab.E].sum())}, "
             f"движение да/нет {int((M == 1).sum())}/{int((M == 0).sum())}")
-        recs.append((info.id, ends, X, Z, M))
+        recs.append({"id": info.id, "ends": ends, "S": S, "Z": Z, "M": M, "quiet": Z[:, lab.E] == 1})
     if not recs:
         raise SystemExit("нет записи обхода на нынешних платах: пройдите сценарий в приложении и нажмите «Сохранить»"
                          if live is not None else "нет подходящих записей")
-    rec_idx = np.concatenate([np.full(len(r[1]), i) for i, r in enumerate(recs)])
-    ends = np.concatenate([r[1] for r in recs])
-    X = np.concatenate([r[2] for r in recs])
-    Z = np.concatenate([r[3] for r in recs])
-    M = np.concatenate([r[4] for r in recs])
-    keep = (Z.sum(axis=1) > 0) | (M >= 0)
-    rec_idx, ends, X, Z, M = rec_idx[keep], ends[keep], X[keep], Z[keep], M[keep]
-    room_windows = int(((Z.sum(axis=1) == 1) & (Z[:, lab.E] == 0)).sum())
+    rec_idx = np.concatenate([np.full(len(r["ends"]), i) for i, r in enumerate(recs)])
+    ends = np.concatenate([r["ends"] for r in recs])
+    Z = np.concatenate([r["Z"] for r in recs])
+    M = np.concatenate([r["M"] for r in recs])
+    ki = np.flatnonzero((Z.sum(axis=1) > 0) | (M >= 0))  # окна с хоть какой-то меткой
+    Zk, Mk = Z[ki], M[ki]
+    room_windows = int(((Zk.sum(axis=1) == 1) & (Zk[:, lab.E] == 0)).sum())
     if not a.sessions and room_windows < MIN_WINDOWS // 2:  # одни «пусто» — комнатам не научить
         raise SystemExit("в записях почти нет окон с известной комнатой: пройдите сценарий обхода в приложении")
-    if len(X) < MIN_WINDOWS:
-        raise SystemExit(f"мало размеченных окон ({len(X)} < {MIN_WINDOWS}): запишите обход подольше")
+    if len(ki) < MIN_WINDOWS:
+        raise SystemExit(f"мало размеченных окон ({len(ki)} < {MIN_WINDOWS}): запишите обход подольше")
+
+    def features(exclude: np.ndarray | None) -> tuple[np.ndarray, list[np.ndarray]]:
+        """Features of all windows; quiet levels of each recording from its windows outside `exclude`."""
+        xs, lv, off = [], [], 0
+        for r in recs:
+            n = len(r["ends"])
+            use = np.ones(n, bool) if exclude is None else ~exclude[off:off + n]
+            off += n
+            levels = quiet_levels(r["S"][use], r["quiet"][use])
+            xs.append(features_from_stats(r["S"], levels))
+            lv.append(levels)
+        return np.concatenate(xs), lv
+
     cfg = FitConfig(epochs=a.epochs)
     jobs = max(1, a.jobs)
     t0 = time.time()
-    # честная проверка: каждый блок времени предсказывает сеть, которая его не видела
-    folds = cv_folds(rec_idx, ends, a.folds)
-    pz, pm = np.zeros(Z.shape), np.zeros(len(Z))
+    # честная проверка: каждый блок времени предсказывает сеть, которая его не видела; тихие уровни для неё —
+    # тоже только по окнам вне этого блока
+    folds = cv_folds(rec_idx[ki], ends[ki], a.folds)
+    pz, pm = np.zeros(Zk.shape), np.zeros(len(Zk))
     status.set("running", "check", 0.45, f"проверка на отложенных блоках ({a.folds})")
     say(f"Проверка: {a.folds} блоков по времени, {jobs} процессов…")
-    fold_jobs = []
+    fold_jobs, fold_tests = [], []
     for f, (tr, te) in enumerate(folds):
-        mu, sd = standardisation(X[tr])
-        fold_jobs.append((X[tr], Z[tr], M[tr], mu, sd, 1000 + f, cfg))
+        excl = np.zeros(len(ends), bool)
+        excl[ki[te]] = True
+        Xk = features(excl)[0][ki]
+        mu, sd = standardisation(Xk[tr])
+        fold_jobs.append((Xk[tr], Zk[tr], Mk[tr], mu, sd, 1000 + f, cfg))
+        fold_tests.append((te, Xk[te], mu, sd))
     with mp.get_context("fork").Pool(jobs) as pool:
         fold_nets = pool.map(_fit_job, fold_jobs)
-        for (tr, te), net, job in zip(folds, fold_nets, fold_jobs):
-            pz[te], pm[te] = predict([net], X[te], job[3], job[4])
-        cv = metrics(Z, M, pz, pm, lab.zones)
+        for (te, Xte, mu, sd), net in zip(fold_tests, fold_nets):
+            pz[te], pm[te] = predict([net], Xte, mu, sd)
+        cv = metrics(Zk, Mk, pz, pm, lab.zones)
         say(f"  {report_line(cv)}")
         status.set("running", "fit", 0.7, f"обучение ансамбля из {a.nets} сетей")
-        say(f"Обучение {a.nets} сетей на всех окнах ({len(X)})…")
+        say(f"Обучение {a.nets} сетей на всех окнах ({len(ki)})…")
+        Xall, levels = features(None)
+        X = Xall[ki]
         mu, sd = standardisation(X)
-        nets = pool.map(_fit_job, [(X, Z, M, mu, sd, s, cfg) for s in range(a.nets)])
+        nets = pool.map(_fit_job, [(X, Zk, Mk, mu, sd, s, cfg) for s in range(a.nets)])
     fit_pz, fit_pm = predict(nets, X, mu, sd)
-    train_m = metrics(Z, M, fit_pz, fit_pm, lab.zones)
+    train_m = metrics(Zk, Mk, fit_pz, fit_pm, lab.zones)
+    quiet = {lk: [round(float(v), 7) for v in levels[0][j]] for j, lk in enumerate(links) if not np.isnan(levels[0][j, 0])}
     meta = {
         "version": int(time.time()), "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "links": links, "zones": lab.zones, "features": list(FEATURES), "stats": list(STATS), "win_s": WIN_S,
-        "floors": quiet_floors,
-        "sessions": [r[0] for r in recs], "windows": int(len(X)), "seconds": round(time.time() - t0, 1),
+        "quiet": quiet,  # тихий уровень каждой линии (из окон «никого нет» новой записи): с него начинает сервер
+        "sessions": [r["id"] for r in recs], "windows": int(len(ki)), "seconds": round(time.time() - t0, 1),
         "metrics": {"heldout": cv, "train": train_m}, "config": cfg.__dict__ | {"hidden": list(cfg.hidden)},
     }
     return {"meta": meta, "mu": mu, "sd": sd, "nets": nets}

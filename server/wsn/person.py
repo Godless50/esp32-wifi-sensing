@@ -547,7 +547,7 @@ class PersonTracker:
         # (точки доступа, бытовые устройства); без него живы 1-2 из 10, и раньше такой ответ просто выбрасывался —
         # карта стояла на «ждём данных». Теперь шаг идёт по активности всех текущих линий, модель — только добавка.
         total = msg.get("links_total")
-        need = MIN_LINKS_LIVE if total is None else max(1, min(MIN_LINKS_LIVE, math.ceil(MODEL_LINKS_FRAC * int(total))))
+        need = MIN_LINKS_LIVE if total is None else max(1, math.ceil(MODEL_LINKS_FRAC * int(total)))
         model_ok = msg.get("links_live") is None or int(msg["links_live"]) >= need
         if model_ok and msg.get("source") == "model":
             self._note_model(msg, now)

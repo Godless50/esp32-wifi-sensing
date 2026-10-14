@@ -10,7 +10,9 @@ log = logging.getLogger(__name__)
 
 
 class Recorder:
-    def __init__(self, store: Store, idle_timeout_s: float = 120.0):
+    # 10 минут: в сценарии человек на 2 минуты уходит из квартиры с телефоном — за дверью может не быть Wi-Fi,
+    # а в кармане ARCore не даёт поз; запись не должна обрываться на этом шаге
+    def __init__(self, store: Store, idle_timeout_s: float = 600.0):
         self.store = store
         self.idle_timeout_s = idle_timeout_s
 

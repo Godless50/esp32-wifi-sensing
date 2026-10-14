@@ -147,3 +147,49 @@ def test_status_and_capture_devices(tmp_path):
             ws.send_json({"type": "hello", "client_id": "t"})
             state = ws.receive_json()
             assert state["type"] == "state" and state["devices"] == []
+
+
+def test_dead_link_is_zero_not_an_extreme_input():
+    import numpy as np
+    from wsn.zonemodel import NF, standardisation, standardize
+    rng = np.random.default_rng(0)
+    X = np.zeros((50, 2, NF))
+    X[:, :, :-1] = rng.normal(-3, 0.01, (50, 2, NF - 1))
+    X[:, :, -1] = 1.0  # обе линии живы во всех окнах: у alive разброс 0
+    mu, sd = standardisation(X)
+    dead = X[:3].copy()
+    dead[:, 1] = 0.0  # вторая линия умерла
+    Z = standardize(dead, mu, sd).reshape(3, 2, NF)
+    assert np.all(Z[:, 1] == 0.0)
+    assert np.abs(Z).max() < 50
+
+
+def test_interrupted_walk_keeps_its_length(tmp_path):
+    store = Store(tmp_path / "wsn.db", tmp_path / "sessions")
+    info = store.start_session("walk", B1, 100.0)
+    for i in range(10):
+        store.append_pose({"seq": i + 1, "t": 100.0 + i * 30, "p": ar(1, 1), "q": [0, 0, 0, 1]})
+    store.append_event({"seq": None, "t": 395.0, "kind": "step", "name": "x"})
+    del store  # сервер перезапустили посреди записи
+    st2 = Store(tmp_path / "wsn.db", tmp_path / "sessions")
+    s = next(x for x in st2.list_sessions() if x.id == info.id)
+    assert s.stopped == 395.0 and s.plan_reason == "interrupted"
+
+
+def test_phone_ping_keeps_the_walk_alive_without_poses(tmp_path):
+    from wsn.capture import CaptureProtocol
+    store = Store(tmp_path / "wsn.db", tmp_path / "sessions")
+    rec = Recorder(store)
+    now = [1000.0]
+    cap = CaptureProtocol(store, rec, lambda: B1, clock=lambda: now[0])
+    cap.on_message("ph", {"type": "hello", "client_id": "ph"})
+    cap.on_message("ph", {"type": "sync", "c0": 0.0, "s": 1000.0, "c1": 0.0})
+    cap.on_message("ph", {"type": "event", "seq": 1, "t": 0.0, "kind": "session_start", "session_kind": "walk"})
+    for _ in range(40):  # 20 минут: телефон в кармане, поз нет, только ping каждые 30 с
+        now[0] += 30
+        cap.on_message("ph", {"type": "ping", "c0": 0.0})
+        rec.tick(now[0])
+    assert store.active() is not None
+    now[0] += rec.idle_timeout_s + 10  # телефон пропал совсем
+    rec.tick(now[0])
+    assert store.active() is None
