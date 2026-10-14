@@ -250,6 +250,11 @@ class Learner:
             log.info("heldout: no labelled windows outside trained_on in %s", path)
             return None, None
         X = d["X"][keep].astype(np.float32)
+        if self.a.heldout_only:  # как в эфире сейчас: живы только эти линии, остальные входы — нули
+            links = [str(m) for m in d["links"]]
+            alive = {m.strip().lower() for m in self.a.heldout_only.split(",") if m.strip()}
+            X[:, [i for i, m in enumerate(links) if m not in alive]] = 0.0
+            log.info("heldout: only links %s kept", sorted(alive))
         log.info("heldout: %d windows from %d sessions outside trained_on (%d still)", len(X),
                  len(np.unique(d["session"][keep])), int((ym[keep] == 0).sum()))
         return X, ym[keep]
@@ -528,6 +533,8 @@ def main() -> None:
     ap.add_argument("--ece-tol", type=float, default=0.02, help="max ECE growth per head on the held-out sessions")
     ap.add_argument("--ha-labels", default="../data/labels/ha.jsonl", help="tools/ha_labels.py journal (optional)")
     ap.add_argument("--min-ha", type=int, default=120, help="nobody-home live windows needed to check false alarms")
+    ap.add_argument("--heldout-only", default="98:b3:ef:02:da:28",
+                    help="links alive on the air now (others zeroed in the honest check); empty = keep all")
     ap.add_argument("--heldout", default="../data/ml/heldout_v1.npz",
                     help="build_seq.py dataset of labelled sessions outside trained_on (honest check)")
     ap.add_argument("--extras", default="../data/ml/live_model_v4", help="train_multi.py ensemble (people, pose)")

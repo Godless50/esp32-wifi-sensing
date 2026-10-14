@@ -67,6 +67,8 @@ def main() -> None:
     a = ap.parse_args()
     md = Path(a.model)
     meta = json.loads((md / "meta.json").read_text(encoding="utf-8"))
+    global L
+    L = len(meta["links"])  # число линий берётся из модели (было зашито 10)
     w = dict(np.load(md / f"net{a.net}_numpy.npz"))
     d = np.load(a.data)
     X = squash(d["X"].astype(np.float32))
