@@ -1,6 +1,7 @@
 /* Survey of the home network — see survey.h. */
 #include "survey.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,10 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "lwip/etharp.h"
+#include "lwip/netif.h"
+#include "lwip/tcpip.h"
+#include "esp_netif_net_stack.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,12 +21,13 @@
 #include "lwip/prot/icmp.h"
 #include "lwip/sockets.h"
 #include "ping_gen.h"
+#include "uplink.h"
 #include "wsn_util.h"
 
 static const char *TAG = "survey";
 
 #define ICMP_ID 0x5755      /* "WU": не путать с ответами постоянного пинга (0x5753) */
-#define WAVE 8              /* запросов подряд: столько адресов сразу ждут ARP (в таблице lwIP всего 10 мест) */
+#define WAVE 16             /* запросов подряд: столько адресов сразу ждут ARP (таблица lwIP — 64, CMakeLists.txt) */
 #define BASE_SLOTS 4        /* окна без пинга: фон каждого передатчика */
 #define SLOT_MACS 16        /* передатчиков на окно (самые частые) */
 #define ATTR_HZ 25          /* пинг в окне устройства */
@@ -40,6 +46,7 @@ typedef struct {
 
 typedef struct {
     uint32_t ip;  /* 0 = окно без пинга (фон) */
+    uint8_t arp_mac[6]; /* MAC этого адреса из ARP-таблицы (кого слышим при пинге — должен совпасть) */
     uint16_t pings, replies;
     uint8_t n;
     slot_mac_t m[SLOT_MACS];
@@ -88,6 +95,11 @@ bool survey_report(wsn_survey_t *out)
     return give;
 }
 
+static struct {
+    uint32_t sent, send_err, rx, rx_short, rx_other, ours;
+    int last_errno;
+} s_dbg;
+
 static void send_echo(int sock, uint32_t addr, uint16_t seq)
 {
     uint8_t pkt[sizeof(struct icmp_echo_hdr) + 8];
@@ -99,7 +111,12 @@ static void send_echo(int sock, uint32_t addr, uint16_t seq)
     memcpy(pkt + sizeof(*h), "wsn-scan", 8);
     h->chksum = inet_chksum(pkt, sizeof(pkt));
     struct sockaddr_in to = {.sin_family = AF_INET, .sin_addr.s_addr = addr};
-    sendto(sock, pkt, sizeof(pkt), 0, (struct sockaddr *)&to, sizeof(to));
+    if (sendto(sock, pkt, sizeof(pkt), 0, (struct sockaddr *)&to, sizeof(to)) < 0) {
+        s_dbg.send_err++;
+        s_dbg.last_errno = errno;
+    } else {
+        s_dbg.sent++;
+    }
 }
 
 /* Next echo reply to our requests (id ICMP_ID): source address, or 0 when none is waiting. */
@@ -111,11 +128,19 @@ static uint32_t next_reply(int sock)
         socklen_t fl = sizeof(from);
         int r = recvfrom(sock, rx, sizeof(rx), MSG_DONTWAIT, (struct sockaddr *)&from, &fl);
         if (r <= 0) return 0;
+        s_dbg.rx++;
         int ihl = (rx[0] & 0x0f) * 4;  /* сырой сокет отдаёт пакет с заголовком IP */
-        if (r < ihl + (int)sizeof(struct icmp_echo_hdr)) continue;
+        if (r < ihl + (int)sizeof(struct icmp_echo_hdr)) {
+            s_dbg.rx_short++;
+            continue;
+        }
         struct icmp_echo_hdr h;
         memcpy(&h, rx + ihl, sizeof(h));
-        if (h.type == ICMP_ER && h.id == ICMP_ID) return from.sin_addr.s_addr;
+        if (h.type == ICMP_ER && h.id == ICMP_ID) {
+            s_dbg.ours++;
+            return from.sin_addr.s_addr;
+        }
+        s_dbg.rx_other++;
     }
 }
 
@@ -127,58 +152,88 @@ static bool excluded(uint32_t ip, uint32_t me)
     return false;
 }
 
-static int add_responder(uint32_t *resp, int n, uint32_t ip)
+/* ARP-опрос подсети: who-has всем адресам сразу (широковещательно, на уровне сети — без очереди разрешения
+ * адресов, которую забивал пинг по мёртвым адресам), потом читаем таблицу ARP: ответившие устройства с их MAC.
+ * Запросы и чтение таблицы — в задаче сети lwIP (блокировки ядра lwIP нет): через tcpip_callback. */
+static SemaphoreHandle_t s_cb_done;
+
+struct arp_sweep {
+    struct netif *nif;
+    uint32_t net_h;
+    int hosts;
+};
+
+static void arp_request_cb(void *arg)
 {
-    for (int i = 0; i < n; i++)
-        if (resp[i] == ip) return n;
-    if (n < WSN_SURVEY_MAX) resp[n++] = ip;
-    return n;
+    struct arp_sweep *w = arg;
+    for (int k = 1; k <= w->hosts; k++) {
+        ip4_addr_t ip;
+        ip4_addr_set_u32(&ip, lwip_htonl(w->net_h | (uint32_t)k));
+        etharp_request(w->nif, &ip);
+    }
+    xSemaphoreGive(s_cb_done);
 }
 
-/* Which hosts of the subnet answer an echo request: two passes, the second only over the silent ones and with
- * a longer wait (devices in power save answer late). Returns the number of responders. */
-static int discover(int sock, uint32_t me, uint32_t mask, uint32_t *resp, int *total_responders)
+struct arp_collect {
+    uint32_t *resp;
+    uint8_t (*macs)[6];
+    int cap, n;
+    uint32_t net_h, mask_h, me;
+};
+
+static void arp_collect_cb(void *arg)
+{
+    struct arp_collect *c = arg;
+    for (size_t i = 0; i < ARP_TABLE_SIZE && c->n < c->cap; i++) {
+        ip4_addr_t *ipaddr = NULL;
+        struct netif *nif = NULL;
+        struct eth_addr *eth = NULL;
+        if (etharp_get_entry(i, &ipaddr, &nif, &eth) != 1 || !ipaddr || !eth) continue;
+        uint32_t ip = ip4_addr_get_u32(ipaddr);
+        if ((lwip_ntohl(ip) & c->mask_h) != c->net_h || excluded(ip, c->me)) continue;
+        c->resp[c->n] = ip;
+        memcpy(c->macs[c->n], eth->addr, 6);
+        c->n++;
+    }
+    xSemaphoreGive(s_cb_done);
+}
+
+static int discover(uint32_t me, uint32_t mask, uint32_t *resp, uint8_t (*macs)[6], int *total_responders)
 {
     uint32_t me_h = lwip_ntohl(me), mask_h = lwip_ntohl(mask);
     if (mask_h < 0xFFFFFF00u) mask_h = 0xFFFFFF00u;
     uint32_t net_h = me_h & mask_h;
     int hosts = (int)(~mask_h) - 1;
+    *total_responders = 0;
     if (hosts < 1) return 0;
     if (hosts > MAX_HOSTS) hosts = MAX_HOSTS;
-    static uint8_t answered[(MAX_HOSTS + 8) / 8];
-    memset(answered, 0, sizeof(answered));
-    int n = 0, total = 0;
-    uint16_t seq = 0;
-    for (int pass = 0; pass < 2; pass++) {
-        for (int h = 1; h <= hosts; h += WAVE) {
-            for (int k = h; k < h + WAVE && k <= hosts; k++) {
-                uint32_t ip = lwip_htonl(net_h | (uint32_t)k);
-                if ((answered[k / 8] >> (k % 8)) & 1 || excluded(ip, me)) continue;
-                send_echo(sock, ip, ++seq);
-                vTaskDelay(pdMS_TO_TICKS(3));
-            }
-            int64_t until = esp_timer_get_time() + (pass ? 250000 : 150000);
-            while (esp_timer_get_time() < until) {
-                uint32_t from;
-                while ((from = next_reply(sock)) != 0) {
-                    uint32_t k = lwip_ntohl(from) - net_h;
-                    if ((lwip_ntohl(from) & mask_h) != net_h || k < 1 || k > (uint32_t)hosts || excluded(from, me))
-                        continue;
-                    if (!((answered[k / 8] >> (k % 8)) & 1)) {
-                        answered[k / 8] |= (uint8_t)(1 << (k % 8));
-                        total++;
-                        n = add_responder(resp, n, from);
-                    }
-                }
-                vTaskDelay(pdMS_TO_TICKS(3));
-            }
-            int done = pass * hosts + h + WAVE;
-            set_progress(WSN_SURVEY_DISCOVER, (uint8_t)(done * 25 / (2 * hosts) > 25 ? 25 : done * 25 / (2 * hosts)),
-                         (uint8_t)(total > 255 ? 255 : total));
-        }
+    struct netif *nif = esp_netif_get_netif_impl(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"));
+    if (!nif) return 0;
+    if (!s_cb_done) {
+        static StaticSemaphore_t buf;
+        s_cb_done = xSemaphoreCreateBinaryStatic(&buf);
     }
-    *total_responders = total;
-    return n;
+    static struct arp_sweep w;
+    w.nif = nif;
+    w.net_h = net_h;
+    w.hosts = hosts;
+    for (int round = 0; round < 3; round++) {  /* три круга: устройства в энергосбережении отвечают не сразу */
+        if (tcpip_callback(arp_request_cb, &w) == ERR_OK) xSemaphoreTake(s_cb_done, pdMS_TO_TICKS(3000));
+        set_progress(WSN_SURVEY_DISCOVER, (uint8_t)(5 + 6 * round), 0);
+        vTaskDelay(pdMS_TO_TICKS(800));
+    }
+    static struct arp_collect col;
+    col.resp = resp;
+    col.macs = macs;
+    col.cap = WSN_SURVEY_MAX;
+    col.n = 0;
+    col.net_h = net_h;
+    col.mask_h = mask_h;
+    col.me = me;
+    if (tcpip_callback(arp_collect_cb, &col) == ERR_OK) xSemaphoreTake(s_cb_done, pdMS_TO_TICKS(3000));
+    *total_responders = col.n;
+    set_progress(WSN_SURVEY_DISCOVER, 25, (uint8_t)(col.n > 255 ? 255 : col.n));
+    return col.n;
 }
 
 static int cmp_frames(const void *a, const void *b)
@@ -187,11 +242,12 @@ static int cmp_frames(const void *a, const void *b)
 }
 
 /* One window: ping `ip` (0 = nobody) at ATTR_HZ for `us`, then keep the transmitters heard most. */
-static void run_slot(int sock, slot_t *sl, uint32_t ip, int64_t us)
+static void run_slot(int sock, slot_t *sl, uint32_t ip, const uint8_t arp_mac[6], int64_t us)
 {
     csi_capture_sources(NULL, 0, true);
     memset(sl, 0, sizeof(*sl));
     sl->ip = ip;
+    if (arp_mac) memcpy(sl->arp_mac, arp_mac, 6);
     int64_t t0 = esp_timer_get_time(), next = t0;
     uint16_t seq = 0;
     while (esp_timer_get_time() - t0 < us) {
@@ -283,8 +339,23 @@ static void analyse(slot_t *slots, int ns, slot_t *base, int nb, int responders,
         const slot_t *sl = &slots[i];
         wsn_survey_entry_t *e = &rep->e[rep->n++];
         memcpy(e->ip, &sl->ip, 4);  /* порядок lwIP = порядок байт адреса */
+        bool have_arp = memcmp(sl->arp_mac, "\0\0\0\0\0\0", 6) != 0;
+        if (have_arp && (sl->arp_mac[0] & 0x02)) e->flags |= WSN_SURVEY_F_RANDOM_MAC;  /* телефон/ноут с частным MAC */
         int best = -1, best_slots = 1 << 30, best_ex = 0;
-        for (int j = 0; j < sl->n; j++) {
+        /* сначала прямой случай: слышим собственный MAC устройства (из ARP) — это точно оно, не ретранслятор */
+        if (have_arp) {
+            for (int j = 0; j < sl->n; j++) {
+                int ex;
+                if (memcmp(sl->m[j].mac, sl->arp_mac, 6) != 0) continue;
+                if (is_candidate(sl, &sl->m[j], base, nb, &ex)) {
+                    best = j;
+                    best_slots = 0;  /* совпало с ARP: сильнее любого эвристического кандидата */
+                    best_ex = ex;
+                }
+                break;
+            }
+        }
+        for (int j = 0; best < 0 && j < sl->n; j++) {
             int ex;
             if (!is_candidate(sl, &sl->m[j], base, nb, &ex)) continue;
             int c;
@@ -371,9 +442,12 @@ static void survey_task(void *arg)
     }
     int64_t t_start = esp_timer_get_time();
     static uint32_t resp[WSN_SURVEY_MAX];
+    static uint8_t resp_mac[WSN_SURVEY_MAX][6];
     int total = 0;
-    int n = discover(sock, ii.ip.addr, ii.netmask.addr, resp, &total);
-    ESP_LOGI(TAG, "%d hosts answer (%d kept)", total, n);
+    memset(&s_dbg, 0, sizeof(s_dbg));
+    int n = discover(ii.ip.addr, ii.netmask.addr, resp, resp_mac, &total);
+    uplink_log("survey: %d devices on the network (ARP); attribution pings, errno %d, rx %lu (ours %lu)",
+               n, s_dbg.last_errno, (unsigned long)s_dbg.rx, (unsigned long)s_dbg.ours);
     int ns = n + BASE_SLOTS;
     slots = heap_caps_calloc(ns, sizeof(slot_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!slots) slots = heap_caps_calloc(ns, sizeof(slot_t), MALLOC_CAP_8BIT);
@@ -391,9 +465,9 @@ static void survey_task(void *arg)
     for (int i = 0; i < ns; i++) {
         bool is_base = nb < BASE_SLOTS && i == (nb * (ns - 1) + (BASE_SLOTS - 1) / 2) / (BASE_SLOTS - 1);
         if (is_base || d >= n) {
-            if (nb < BASE_SLOTS) run_slot(sock, &base[nb++], 0, slot_us);
+            if (nb < BASE_SLOTS) run_slot(sock, &base[nb++], 0, NULL, slot_us);
         } else {
-            run_slot(sock, &slots[d], resp[d], slot_us);
+            run_slot(sock, &slots[d], resp[d], resp_mac[d], slot_us);
             d++;
         }
         set_progress(WSN_SURVEY_ATTRIBUTE, (uint8_t)(25 + 70 * (i + 1) / ns), (uint8_t)(total > 255 ? 255 : total));

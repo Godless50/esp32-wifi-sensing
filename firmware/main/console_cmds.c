@@ -9,6 +9,11 @@
 #include <string.h>
 
 #include "esp_console.h"
+#include "esp_timer.h"
+#include "lwip/inet.h"
+#include "lwip/inet_chksum.h"
+#include "lwip/prot/icmp.h"
+#include "lwip/sockets.h"
 #include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
@@ -267,6 +272,56 @@ static int cmd_survey(int argc, char **argv)
     return err != ESP_OK;
 }
 
+/* pingtest <a.b.c.d> [count] — echo requests at 5 Hz: does this host answer this board (network diagnostics). */
+static int cmd_pingtest(int argc, char **argv)
+{
+    struct in_addr a;
+    int n = argc == 3 ? atoi(argv[2]) : 10;
+    if (argc < 2 || argc > 3 || !inet_aton(argv[1], &a) || n < 1 || n > 100) {
+        puts("ERR usage: pingtest <a.b.c.d> [1..100]");
+        return 1;
+    }
+    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if (sock < 0) {
+        puts("ERR socket");
+        return 1;
+    }
+    int got = 0;
+    for (int i = 0; i < n; i++) {
+        uint8_t pkt[sizeof(struct icmp_echo_hdr) + 8] = {0};
+        struct icmp_echo_hdr *h = (struct icmp_echo_hdr *)pkt;
+        h->type = ICMP_ECHO;
+        h->id = 0x5754;
+        h->seqno = lwip_htons((uint16_t)i);
+        h->chksum = inet_chksum(pkt, sizeof(pkt));
+        struct sockaddr_in to = {.sin_family = AF_INET, .sin_addr.s_addr = a.s_addr};
+        int64_t t0 = esp_timer_get_time();
+        int r = sendto(sock, pkt, sizeof(pkt), 0, (struct sockaddr *)&to, sizeof(to));
+        bool ok = false;
+        while (esp_timer_get_time() - t0 < 200000 && !ok) {
+            uint8_t rx[96];
+            struct sockaddr_in from;
+            socklen_t fl = sizeof(from);
+            int k = recvfrom(sock, rx, sizeof(rx), MSG_DONTWAIT, (struct sockaddr *)&from, &fl);
+            if (k <= 0) {
+                vTaskDelay(pdMS_TO_TICKS(2));
+                continue;
+            }
+            int ihl = (rx[0] & 0x0f) * 4;
+            struct icmp_echo_hdr e;
+            if (k < ihl + (int)sizeof(e)) continue;
+            memcpy(&e, rx + ihl, sizeof(e));
+            if (e.type == ICMP_ER && e.id == 0x5754 && from.sin_addr.s_addr == a.s_addr) ok = true;
+        }
+        if (ok) got++;
+        printf("PING seq=%d send=%d %s %lld ms\n", i, r, ok ? "reply" : "timeout",
+               (long long)((esp_timer_get_time() - t0) / 1000));
+    }
+    close(sock);
+    printf("PING_END %d/%d\n", got, n);
+    return 0;
+}
+
 /* scan — APs on all channels (briefly interrupts CSI). */
 static int cmd_scan(int argc, char **argv)
 {
@@ -322,6 +377,7 @@ esp_err_t console_start(const wsn_settings_t *active, csi_hz_fn_t csi_hz)
         {.command = "promisc", .help = "promisc on|all|off (runtime; on = MPDU only)", .func = cmd_promisc},
         {.command = "csi_src", .help = "csi_src [reset]: CSI per transmitter", .func = cmd_csi_src},
         {.command = "scan", .help = "scan access points", .func = cmd_scan},
+        {.command = "pingtest", .help = "pingtest <ip> [count]: does a host answer this board", .func = cmd_pingtest},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
     return esp_console_start_repl(repl);
