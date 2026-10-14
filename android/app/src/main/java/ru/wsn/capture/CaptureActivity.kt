@@ -72,7 +72,8 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var lastPoseMs = 0.0
 
     private lateinit var client: CaptureClient
-    private var transport: Transport? = null
+    private var transport: CaptureLink? = null
+    private var hubMode = false
     private var sessionKey: String? = null
     private val marked = mutableSetOf<String>()
     private val rooms = mutableListOf<String>()
@@ -89,7 +90,8 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Server.init(this)
-        if (!Server.paired()) { finish(); return }
+        hubMode = !Server.paired()   // без сервера на компьютере центр — этот телефон (HubService)
+        if (hubMode && ru.wsn.capture.hub.HubService.current == null) ru.wsn.capture.hub.HubService.start(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)  // экран не гаснет во время сценария
         val prefs = getSharedPreferences("wsn", MODE_PRIVATE)
         val cid = prefs.getString("client_id", null) ?: ("android-" + UUID.randomUUID().toString().take(8)).also {
@@ -105,11 +107,11 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         client.sink = CaptureClient.Sink { transport?.send(it) }
         tone = try { ToneGenerator(AudioManager.STREAM_ALARM, 90) } catch (e: Exception) { null }
         buildUi()
-        transport = Transport("/ws/capture",
-            onOpen = { client.onOpen(); client.resendEvents(); log("Связь с сервером есть.") },
-            onMessage = { client.onMessage(it); render() },
-            onClosed = { reason -> if (client.online) log("Нет связи: $reason", true); client.onClosed(); render() },
-        ).also { it.connect() }
+        val onOpen = { client.onOpen(); client.resendEvents(); log(if (hubMode) "Центр в телефоне на связи." else "Связь с сервером есть.") }
+        val onMsg = { m: String -> client.onMessage(m); render() }
+        val onClosed = { reason: String -> if (client.online) log("Нет связи: $reason", true); client.onClosed(); render() }
+        transport = (if (hubMode) LocalLink(cid, onOpen, onMsg, onClosed) else Transport("/ws/capture", onOpen, onMsg, onClosed))
+            .also { it.connect() }
         main.post(object : Runnable { override fun run() { client.flushPoses(); main.postDelayed(this, 200) } })
         main.post(object : Runnable { override fun run() { if (client.online) { client.ping(); client.resendEvents() }; main.postDelayed(this, 5000) } })
         main.post(object : Runnable { override fun run() { tickScenario(); main.postDelayed(this, 1000) } })
@@ -330,7 +332,7 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private fun startScenario() {
         if (roomOpen != null) closeRoom()
         if (rooms.isEmpty()) { log("Сначала отметьте хотя бы одну комнату.", true); return }
-        val steps = Scenario.build(rooms)
+        val steps = Scenario.build(rooms, phoneStays = hubMode)
         runner = ScenarioRunner(steps, onStep = { st, i ->
             client.event("step", JSONObject().put("name", st.name).put("activity", st.activity)
                 .put("room", st.room ?: JSONObject.NULL).put("duration_s", st.seconds).put("index", i))

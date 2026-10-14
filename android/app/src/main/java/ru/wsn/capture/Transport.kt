@@ -11,17 +11,24 @@ import okhttp3.WebSocketListener
  * WebSocket to the paired server (TLS trust and password come from [Server.http]) with automatic reconnect (2 s).
  * Callbacks run on the main thread.
  */
+/** What the capture screen talks through: the WebSocket to a computer server, or the hub inside this phone. */
+interface CaptureLink {
+    fun connect()
+    fun send(text: String): Boolean
+    fun close()
+}
+
 class Transport(
     private val path: String,
     private val onOpen: () -> Unit,
     private val onMessage: (String) -> Unit,
     private val onClosed: (reason: String) -> Unit,
-) {
+) : CaptureLink {
     private val main = Handler(Looper.getMainLooper())
     private var ws: WebSocket? = null
     private var stopped = false
 
-    fun connect() {
+    override fun connect() {
         stopped = false
         val client = try { Server.http() } catch (e: Exception) { onClosed("не сопряжено"); return }
         val req = Request.Builder().url(Server.wsUrl(path)).build()
@@ -41,11 +48,39 @@ class Transport(
         }
     }
 
-    fun send(text: String): Boolean = ws?.send(text) ?: false
+    override fun send(text: String): Boolean = ws?.send(text) ?: false
 
-    fun close() {
+    override fun close() {
         stopped = true
         ws?.close(1000, "bye")
         ws = null
     }
+}
+
+/** The capture protocol served by the hub service in this phone (LocalCapture): no network, the same messages. */
+class LocalLink(
+    private val clientId: String,
+    private val onOpen: () -> Unit,
+    private val onMessage: (String) -> Unit,
+    private val onClosed: (reason: String) -> Unit,
+) : CaptureLink {
+    private val main = Handler(Looper.getMainLooper())
+    private var open = false
+
+    override fun connect() {
+        val hub = ru.wsn.capture.hub.HubService.current
+        if (hub == null) { onClosed("центр не запущен"); main.postDelayed({ connect() }, 2000); return }
+        open = true
+        main.post { onOpen() }
+    }
+
+    override fun send(text: String): Boolean {
+        val hub = ru.wsn.capture.hub.HubService.current ?: return false
+        if (!open) return false
+        val replies = synchronized(hub.local) { hub.local.onMessage(clientId, text) }
+        for (r in replies) main.post { onMessage(r) }
+        return true
+    }
+
+    override fun close() { open = false }
 }

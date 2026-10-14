@@ -7,8 +7,31 @@ class Console(private val port: SerialPort) {
     private val buf = StringBuilder()
 
     fun send(cmd: String) {
-        port.write((cmd + "\r\n").toByteArray(Charsets.US_ASCII))
+        port.write((cmd + "\r\n").toByteArray(Charsets.UTF_8))
     }
+
+    /** One argument for the board's console (esp_console splits on spaces; quotes and backslashes escape). */
+    fun quote(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+    data class Ap(val bssid: String, val channel: Int, val rssi: Int, val ssid: String)
+
+    /** Access points the board hears ("scan": AP <bssid> ch=<n> rssi=<dBm> ssid=<name> ... AP_END). */
+    fun scan(ms: Int = 12000): List<Ap> {
+        send("scan")
+        val out = ArrayList<Ap>()
+        val re = Regex("""^AP ([0-9a-f:]{17}) ch=(\d+) rssi=(-?\d+) ssid=(.*)$""")
+        val end = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < end) {
+            for (l in lines(300)) {
+                if (l.startsWith("AP_END")) return out
+                re.find(l)?.let { m -> out.add(Ap(m.groupValues[1], m.groupValues[2].toInt(), m.groupValues[3].toInt(), m.groupValues[4])) }
+            }
+        }
+        return out
+    }
+
+    /** The node of the home network the board hears best (mesh: each board joins its nearest node). */
+    fun bestBssid(ssid: String): String? = scan().filter { it.ssid == ssid }.maxByOrNull { it.rssi }?.bssid
 
     /** Collect lines for up to `ms`, yielding each complete line. */
     fun lines(ms: Int): List<String> {
@@ -55,7 +78,7 @@ class Console(private val port: SerialPort) {
         val mac = st["mac"] ?: throw EspLoader.EspError("no MAC in STATUS")
         send("key set ${p.keyHex}")
         if (expect("OK key", 3000) == null) throw EspLoader.EspError("key set failed")
-        send("wifi set ${p.ssid} ${p.password} ${p.bssid}")   // password -> NVS only; not logged
+        send("wifi set ${quote(p.ssid)} ${quote(p.password)} ${p.bssid}")   // password -> NVS only; not logged
         if (expect("OK wifi", 3000) == null) throw EspLoader.EspError("wifi set failed")
         send("server set ${p.host} ${p.port}")
         if (expect("OK server", 3000) == null) throw EspLoader.EspError("server set failed")

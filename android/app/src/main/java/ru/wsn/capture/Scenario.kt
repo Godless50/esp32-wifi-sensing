@@ -16,9 +16,14 @@ object Scenario {
     const val TOUR_S = 90
     const val WALK2_S = 30
 
-    fun build(rooms: List<String>): List<Step> {
+    /** phoneStays: the phone is the hub and must keep receiving, so on the empty steps it stays at home. */
+    fun build(rooms: List<String>, phoneStays: Boolean = false): List<Step> {
         val s = mutableListOf<Step>()
-        s += Step("empty1", "Выйдите из квартиры с телефоном и закройте дверь. Вернитесь по сигналу.", "empty", null, EMPTY_S)
+        val leave = if (phoneStays) "Положите телефон здесь, выйдите из квартиры и закройте дверь. Вернитесь через ${EMPTY_S / 60} минуты."
+                    else "Выйдите из квартиры с телефоном и закройте дверь. Вернитесь по сигналу."
+        val leave2 = if (phoneStays) "Снова положите телефон, выйдите из квартиры и закройте дверь. Вернитесь через ${EMPTY_S / 60} минуты."
+                     else "Снова выйдите из квартиры с телефоном, закройте дверь и вернитесь по сигналу."
+        s += Step("empty1", leave, "empty", null, EMPTY_S)
         for (r in rooms) {
             s += Step("walk:$r", "«$r»: медленно ходите по всей комнате — вдоль стен и через середину.", "walk", r, WALK_S)
             s += Step("stand:$r", "«$r»: встаньте посреди комнаты и стойте спокойно.", "stand", r, STAND_S)
@@ -26,7 +31,7 @@ object Scenario {
         }
         s += Step("tour", "Пройдите по всем комнатам подряд, заходя в каждую.", "walk", null, TOUR_S)
         for (r in rooms.reversed()) s += Step("walk2:$r", "«$r»: ещё раз походите по комнате.", "walk", r, WALK2_S)
-        s += Step("empty2", "Снова выйдите из квартиры с телефоном, закройте дверь и вернитесь по сигналу.", "empty", null, EMPTY_S)
+        s += Step("empty2", leave2, "empty", null, EMPTY_S)
         return s
     }
 

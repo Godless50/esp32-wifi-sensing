@@ -32,7 +32,12 @@ class OtgProvision(
         Thread.sleep(2500)                               // the app firmware boots and re-enumerates
         port = openPort()
         val console = Console(port)
-        val mac = console.provision(Console.Provision(keyHex, s.ssid, s.password, s.bssid, s.host, s.port))
+        console.status() ?: throw EspLoader.EspError("плата не отвечает после прошивки")
+        val bssid = s.bssid.ifEmpty {  // узел сети, который плата слышит лучше всего (в mesh у каждой платы свой)
+            log("ищу сеть «${s.ssid}»")
+            console.bestBssid(s.ssid) ?: throw EspLoader.EspError("плата не видит сеть «${s.ssid}» (2,4 ГГц?)")
+        }
+        val mac = console.provision(Console.Provision(keyHex, s.ssid, s.password, bssid, s.host, s.port))
         port.close()
         log("provisioned $mac on image $which")
         return Result(mac, which, true)

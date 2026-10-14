@@ -30,6 +30,8 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var bPair: Button
     private lateinit var bCapture: Button
     private lateinit var bMap: Button
+    private lateinit var bSetup: Button
+    private lateinit var bHubMap: Button
     private var polling = false
 
     private val scan = registerForActivityResult(ScanContract()) { r ->
@@ -50,14 +52,18 @@ class HomeActivity : AppCompatActivity() {
         bCapture = button("Разметка квартиры и запись сценария", true) { startActivity(Intent(this, CaptureActivity::class.java)) }
         bMap = button("Карта", true) { startActivity(Intent(this, MapActivity::class.java)) }
         val bPw = button("Пароль сервера", false) { askPassword(null) }
-        for (b in listOf(bCapture, bMap, bPair, bPw)) col.addView(b, LinearLayout.LayoutParams(MATCH_PARENT, 150).apply { setMargins(0, 12, 0, 12) })
+        bSetup = button("Настройка без компьютера", true) { startActivity(Intent(this, SetupActivity::class.java)) }
+        bHubMap = button("Карта", true) { startActivity(Intent(this, HubMapActivity::class.java)) }
+        for (b in listOf(bSetup, bHubMap, bCapture, bMap, bPair, bPw)) col.addView(b, LinearLayout.LayoutParams(MATCH_PARENT, 150).apply { setMargins(0, 12, 0, 12) })
         col.addView(TextView(this).apply {
             textSize = 13f; setTextColor(Color.GRAY); setPadding(0, 24, 0, 0)
-            text = "Порядок: 1) на компьютере ./install.sh и QR-код сопряжения; 2) разметка и сценарий здесь; " +
-                "3) на компьютере ./train.sh; 4) «Карта». Долгое нажатие на «Сопряжение» — ввести адрес и код вручную."
+            text = "Без компьютера: «Настройка без компьютера» — телефон прошьёт плату по кабелю и сам станет центром. " +
+                "С компьютером: ./install.sh и QR-код сопряжения; долгое нажатие на «Сопряжение» — ввести адрес и код вручную."
         })
         setContentView(ScrollView(this).apply { setBackgroundColor(Color.rgb(11, 13, 17)); addView(col) })
         render(null, null)
+        if (!Server.paired() && getSharedPreferences("wsn-setup", MODE_PRIVATE).contains("page"))
+            ru.wsn.capture.hub.HubService.start(this)  // телефон — центр: служба работает и после перезапуска приложения
     }
 
     override fun onResume() {
@@ -90,10 +96,15 @@ class HomeActivity : AppCompatActivity() {
 
     private fun render(st: JSONObject?, err: String?) {
         val paired = Server.paired()
-        bCapture.isEnabled = paired; bMap.isEnabled = paired
-        bCapture.alpha = if (paired) 1f else 0.4f; bMap.alpha = bCapture.alpha
+        bCapture.visibility = if (paired) android.view.View.VISIBLE else android.view.View.GONE
+        bMap.visibility = bCapture.visibility
+        bSetup.visibility = if (paired) android.view.View.GONE else android.view.View.VISIBLE
+        bHubMap.visibility = bSetup.visibility
         if (!paired) {
-            info.text = "Не сопряжено. На компьютере запустите ./install.sh (или ./install.sh pair) и отсканируйте QR-код."
+            val h = ru.wsn.capture.hub.HubService.current
+            info.text = if (h == null || h.knownBoards().isEmpty()) "Центр — этот телефон. Начните с «Настройка без компьютера»."
+                else "Центр — этот телефон. Плат на связи: ${h.boards().size} из ${h.knownBoards().size}." +
+                    if (h.modelMeta() == null) "\nМодели ещё нет: пройдите обход в настройке." else ""
             return
         }
         if (st == null) {
