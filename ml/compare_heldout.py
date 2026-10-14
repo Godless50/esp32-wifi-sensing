@@ -44,7 +44,8 @@ def evaluate(model: str, data: str, only: str | None) -> dict:
         "trained_on_overlap": sorted(set(np.unique(d["session"]).tolist()) & set(meta.get("trained_on", []))),
         "moving": {**report(pm[m], ym[m]), "balanced_acc": round(float(bal(ym[m], (pm[m] > 0.5).astype(int))), 4),
                    "false_moving_on_still": round(float((pm[still] > 0.5).mean()), 4) if still.any() else None},
-        "activity": {**report(pa[a], ya[a]), "balanced_acc": round(float(bal(ya[a], pa[a].argmax(1))), 4)},
+        "activity": ({**report(pa[a], ya[a]), "balanced_acc": round(float(bal(ya[a], pa[a].argmax(1))), 4)}
+                     if a.any() else {"n": 0, "acc": None, "balanced_acc": None, "ece": None}),
     }
 
 
