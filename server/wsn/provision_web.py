@@ -4,7 +4,7 @@ The API keeps the password in memory for 10 minutes; this host-side process take
 data/run/provision.token, writes key / Wi-Fi / server / links into the board over USB and reports the result.
 
 docker run --rm --network host --device /dev/ttyACM1 -v $PWD/data:/data wsn-server \
-    python -m wsn.provision_web --port /dev/ttyACM1 --ssid HomeNet --bssid 02:00:00:00:a1:18 --host 192.168.4.77
+    python -m wsn.provision_web --port /dev/ttyACM1 --ssid MyWiFi --bssid aa:bb:cc:dd:ee:ff --host 192.168.1.10
 """
 
 from __future__ import annotations
