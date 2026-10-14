@@ -3,7 +3,14 @@
 
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-feature android:name="android.hardware.camera.ar" android:required="true" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- AR is used by the setup wizard (rooms, walk), but the hub phone runs headless, so AR is optional. -->
+    <uses-feature android:name="android.hardware.camera.ar" android:required="false" />
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
 
     <application
@@ -12,7 +19,7 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:allowBackup="false">
 
-        <meta-data android:name="com.google.ar.core" android:value="required" />
+        <meta-data android:name="com.google.ar.core" android:value="optional" />
 
         <activity
             android:name=".HomeActivity"
@@ -33,5 +40,9 @@
             android:name=".MapActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
+        <service
+            android:name=".hub.HubService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>
