@@ -1,6 +1,7 @@
 package ru.wsn.capture.esp
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
@@ -46,7 +47,8 @@ class OtgProvisionTest {
         override fun close() {}
     }
 
-    private class FakeConsole : SerialPort {
+    /** The app REPL. `wifi` is what STATUS reports (a fresh port per boot, as on the phone). */
+    private class FakeConsole(private val wifi: String = "IDLE", private val ip: String = "0.0.0.0") : SerialPort {
         private val outbox = ByteArrayOutputStream(); private val line = StringBuilder()
         var wifiArgs: String? = null
         override fun write(data: ByteArray) {
@@ -55,7 +57,7 @@ class OtgProvisionTest {
             while (nl >= 0) {
                 val cmd = line.substring(0, nl).trim(); line.delete(0, nl + 1)
                 val reply = when {
-                    cmd == "status" -> "STATUS wifi=IDLE mac=7c:4f:ad:bc:9b:54 server=-:5005 links=0"
+                    cmd == "status" -> "STATUS wifi=$wifi rssi=-50 ip=$ip gw=0.0.0.0 mac=7c:4f:ad:bc:9b:54 server=-:5005 links=0"
                     cmd.startsWith("key set") -> "OK key (reboot to apply)"
                     cmd.startsWith("wifi set") -> { wifiArgs = cmd; "OK wifi (reboot to apply)" }
                     cmd.startsWith("server set") -> "OK server (reboot to apply)"
@@ -74,17 +76,45 @@ class OtgProvisionTest {
         override fun close() {}
     }
 
-    @Test fun flashesThenProvisions() {
+    private val key = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+    private val image = mapOf("main" to ByteArray(3000) { (it and 0xFF).toByte() })
+
+    @Test fun flashesProvisionsAndSeesTheBoardOnWifi() {
         val console = FakeConsole()
         var call = 0
-        val ports = listOf<SerialPort>(FakeRom(), console)
-        val prov = OtgProvision(openPort = { ports[call++] },
-            images = mapOf("main" to ByteArray(3000) { (it and 0xFF).toByte() }))
-        val r = prov.run("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-            OtgProvision.Settings("MyWiFi", "secretpass", "98:b3:ef:02:da:28", "192.168.4.77", 5005))
+        val ports = listOf<SerialPort>(FakeRom(), console, FakeConsole("CONNECTED", "192.168.4.50"))
+        val prov = OtgProvision(openPort = { ports[call++] }, images = image, sleep = {})
+        val r = prov.run(key, OtgProvision.Settings("MyWiFi", "secretpass", "98:b3:ef:02:da:28", "192.168.4.77", 5005))
         assertEquals("7c:4f:ad:bc:9b:54", r.mac)
         assertEquals("main", r.image)
-        assertEquals(2, call)  // ROM port then app-console port
+        assertEquals("192.168.4.50", r.ip)
+        assertEquals(3, call)  // ROM port, app console, the console again after the reboot
         assertTrue("password reached the board over the cable", console.wifiArgs!!.contains("secretpass"))
+    }
+
+    @Test fun wrongPasswordIsCaughtOnTheCableAndRetriedWithoutFlashing() {
+        var call = 0
+        val retry = FakeConsole()
+        val ports = listOf<SerialPort>(FakeRom(), FakeConsole(), FakeConsole("AUTH_FAIL"), retry,
+            FakeConsole("CONNECTED", "192.168.4.51"))
+        val prov = OtgProvision(openPort = { ports[call++] }, images = image, sleep = {})
+        val s = OtgProvision.Settings("MyWiFi", "wrongpass", "98:b3:ef:02:da:28", "192.168.4.77", 5005)
+        val e = assertThrows(OtgProvision.WifiFailed::class.java) { prov.run(key, s) }
+        assertEquals(Console.Wifi.AUTH_FAIL, e.outcome)
+        assertEquals("7c:4f:ad:bc:9b:54", e.mac)
+        val r = prov.retryWifi(s.copy(password = "rightpass"))
+        assertEquals("192.168.4.51", r.ip)
+        assertEquals(5, call)  // no ROM port the second time
+        assertTrue(retry.wifiArgs!!.contains("rightpass"))
+    }
+
+    @Test fun boardThatCannotFindTheNetworkSaysSo() {
+        var call = 0
+        val ports = listOf<SerialPort>(FakeRom(), FakeConsole(), FakeConsole("BSSID_NOT_FOUND"))
+        val prov = OtgProvision(openPort = { ports[call++] }, images = image, sleep = {})
+        val e = assertThrows(OtgProvision.WifiFailed::class.java) {
+            prov.run(key, OtgProvision.Settings("MyWiFi", "secretpass", "98:b3:ef:02:da:28", "192.168.4.77", 5005))
+        }
+        assertEquals(Console.Wifi.NOT_FOUND, e.outcome)
     }
 }

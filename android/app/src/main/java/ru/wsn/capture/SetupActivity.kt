@@ -66,6 +66,8 @@ class SetupActivity : AppCompatActivity() {
         @Volatile private var flashProgress = 0
         @Volatile private var flashResult: String? = null   // MAC of the board when the last flash finished
         @Volatile private var flashError: String? = null
+        /** The board flashed and keyed, but it did not join Wi-Fi: it is still on the cable, ask the password again. */
+        @Volatile private var wifiFailMac: String? = null
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -117,11 +119,12 @@ class SetupActivity : AppCompatActivity() {
                 button("Подключить плату кабелем") { go(Page.CABLE) }
                 if (hub()?.knownBoards()?.isNotEmpty() == true) button("Платы уже настроены — дальше", false) { go(Page.MORE) }
             }
-            Page.CABLE -> cablePage()
+            Page.CABLE -> if (wifiFailMac != null && !busy) wifiRetryPage(null) else cablePage()
             Page.PLACE -> {
                 title.text = "Поставьте плату на место"
-                body.text = "Отключите кабель и поставьте плату туда, где она будет стоять всегда, — в розетку через " +
-                    "зарядку. Лучше повыше, не в шкаф и не за телевизор. Ждём, когда она выйдет на связь по Wi-Fi…"
+                body.text = "Плата подключилась к вашему Wi-Fi. Отключите кабель и поставьте её туда, где она будет " +
+                    "стоять всегда, — в розетку через зарядку. Лучше повыше, не в шкаф и не за телевизор. " +
+                    "Ждём, когда она выйдет на связь…"
             }
             Page.MORE -> {
                 title.text = "Платы"
@@ -184,7 +187,8 @@ class SetupActivity : AppCompatActivity() {
                 progress.visibility = android.view.View.VISIBLE
                 progress.progress = flashProgress; body.text = flashText
                 flashError?.let { busy = false; flashError = null; progress.visibility = android.view.View.GONE
-                    body.text = "Не получилось: $it\n\nПроверьте кабель (нужен кабель с данными) и попробуйте ещё раз." }
+                    if (wifiFailMac != null) wifiRetryPage(it)
+                    else body.text = "Не получилось: $it\n\nПроверьте кабель (нужен кабель с данными) и попробуйте ещё раз." }
                 flashResult?.let { lastBoard = it; flashResult = null; busy = false; go(Page.PLACE) }
             }
             Page.PLACE -> {
@@ -307,6 +311,55 @@ class SetupActivity : AppCompatActivity() {
                         beforeProvision = { mac -> h.addKey(mac, key, "Плата $n") })  // ключ — в телефон раньше, чем в плату
                 h.announce()
                 flashResult = r.mac.lowercase()
+            } catch (e: OtgProvision.WifiFailed) {
+                h.announce()                       // ключ уже в плате и в телефоне; не хватает только сети
+                wifiFailMac = e.mac.lowercase(); flashError = e.message
+            } catch (e: Exception) {
+                flashError = e.message ?: e.javaClass.simpleName
+            } finally {
+                flashing.set(false)
+            }
+        }
+    }
+
+    /** The board is flashed and keyed but is not on Wi-Fi. The cable is still in: only the network is set again. */
+    private fun wifiRetryPage(reason: String?) {
+        form.removeAllViews(); buttons.removeAllViews()
+        title.text = "Плата не подключилась к Wi-Fi"
+        body.text = (reason?.let { "Причина: $it.\n\n" } ?: "") + "Кабель не отключайте. Проверьте имя сети и пароль " +
+            "(с учётом заглавных букв) и попробуйте ещё раз — прошивать плату заново не нужно."
+        val ssid = EditText(this).apply { hint = "Имя сети Wi-Fi"; setText(currentSsid() ?: ""); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY) }
+        val pass = EditText(this).apply {
+            hint = "Пароль Wi-Fi"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
+        }
+        form.addView(ssid); form.addView(pass)
+        button("Проверить подключение") {
+            val s = ssid.text.toString().trim(); val pw = pass.text.toString()
+            if (s.isEmpty()) { body.text = "Введите имя сети."; return@button }
+            if (pw.isNotEmpty() && (pw.length < 8 || pw.length > 63)) { body.text = "Пароль Wi-Fi — от 8 до 63 символов."; return@button }
+            pass.setText("")
+            retryWifi(s, pw)
+        }
+        button("Прошить плату заново", false) { wifiFailMac = null; cablePage() }
+    }
+
+    private fun retryWifi(ssid: String, password: String) {
+        if (hub() == null) { body.text = "Центр запускается, подождите секунду."; return }
+        if (!flashing.compareAndSet(false, true)) { busy = true; return }
+        busy = true
+        form.removeAllViews(); buttons.removeAllViews()
+        flashText = "Плата пробует подключиться к Wi-Fi…"; flashProgress = 0; flashResult = null; flashError = null
+        progress.visibility = android.view.View.VISIBLE; progress.progress = 0
+        val app = applicationContext
+        thread {
+            try {
+                val r = OtgProvision({ openPort(app) }, emptyMap()) { flashText = it }
+                    .retryWifi(OtgProvision.Settings(ssid, password, "", "", HubService.PORT))
+                wifiFailMac = null
+                flashResult = r.mac.lowercase()
+            } catch (e: OtgProvision.WifiFailed) {
+                flashError = e.message
             } catch (e: Exception) {
                 flashError = e.message ?: e.javaClass.simpleName
             } finally {

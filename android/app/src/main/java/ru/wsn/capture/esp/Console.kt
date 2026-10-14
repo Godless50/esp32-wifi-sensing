@@ -82,11 +82,42 @@ class Console(private val port: SerialPort) {
         val mac = st["mac"] ?: throw EspLoader.EspError("no MAC in STATUS")
         send("key set ${p.keyHex}")
         if (expect("OK key", 3000) == null) throw EspLoader.EspError("key set failed")
-        send("wifi set ${quote(p.ssid)} ${quote(p.password)} ${p.bssid}")   // password -> NVS only; not logged
-        if (expect("OK wifi", 3000) == null) throw EspLoader.EspError("wifi set failed")
+        setWifi(p.ssid, p.password, p.bssid)
         send("server set ${p.host} ${p.port}")
         if (expect("OK server", 3000) == null) throw EspLoader.EspError("server set failed")
         send("reboot")
         return mac
+    }
+
+    /** Only the Wi-Fi network (a retry after a wrong password: key and server stay as they are). Needs a reboot. */
+    fun setWifi(ssid: String, password: String, bssid: String) {
+        send("wifi set ${quote(ssid)} ${quote(password)} $bssid")   // password -> NVS only; not logged
+        if (expect("OK wifi", 3000) == null) throw EspLoader.EspError("wifi set failed")
+    }
+
+    enum class Wifi { CONNECTED, AUTH_FAIL, NOT_FOUND, TIMEOUT }
+
+    /** After a reboot: wait until the board joins the network (CONNECTED with an address) or clearly cannot.
+     *  The firmware shows AUTH_FAIL / BSSID_NOT_FOUND between retries and CONNECTING while it retries, so a
+     *  failure counts once it has been seen in `failPolls` polls; otherwise the most seen failure at the end. */
+    fun waitWifi(timeoutMs: Long = 40_000, failPolls: Int = 3, now: () -> Long = System::currentTimeMillis): Pair<Wifi, String?> {
+        val end = now() + timeoutMs
+        var auth = 0; var notFound = 0
+        while (now() < end) {
+            val st = status(1) ?: continue
+            val ip = st["ip"]?.takeIf { it != "0.0.0.0" }
+            when (st["wifi"]) {
+                "CONNECTED" -> if (ip != null) return Wifi.CONNECTED to ip
+                "AUTH_FAIL" -> auth++
+                "BSSID_NOT_FOUND" -> notFound++
+            }
+            if (auth >= failPolls) return Wifi.AUTH_FAIL to null
+            if (notFound >= failPolls) return Wifi.NOT_FOUND to null
+        }
+        return when {
+            auth > 0 && auth >= notFound -> Wifi.AUTH_FAIL
+            notFound > 0 -> Wifi.NOT_FOUND
+            else -> Wifi.TIMEOUT
+        } to null
     }
 }
