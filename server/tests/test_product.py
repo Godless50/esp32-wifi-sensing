@@ -193,3 +193,24 @@ def test_phone_ping_keeps_the_walk_alive_without_poses(tmp_path):
     now[0] += rec.idle_timeout_s + 10  # телефон пропал совсем
     rec.tick(now[0])
     assert store.active() is None
+
+
+def test_app_walk_replaces_older_walks_and_older_hand_edits(tmp_path):
+    import json as _json
+    import os
+    store = Store(tmp_path / "wsn.db", tmp_path / "sessions")
+    old = store.start_session("walk", B1, 10.0)  # прежняя разметка: «плата» и «роутер», своя система координат
+    store.append_event({"seq": None, "t": 11.0, "kind": "origin", "p": ar(0, 0)})
+    store.append_event({"seq": None, "t": 12.0, "kind": "router", "p": ar(3, 0)})
+    store.append_event({"seq": None, "t": 13.0, "kind": "room_new", "name": "старая"})
+    for i, (x, y) in enumerate([[0, 0], [2, 0], [2, 2], [0, 2]]):
+        store.append_event({"seq": None, "t": 14.0 + i, "kind": "corner", "p": ar(x, y)})
+    store.append_event({"seq": None, "t": 19.0, "kind": "room_close"})
+    store.stop_session(old.id, 30.0)
+    ov = tmp_path / "plan_overrides.json"
+    ov.write_text(_json.dumps({"rooms": {"правка": [[0, 0], [1, 0], [1, 1], [0, 1]]}}))
+    os.utime(ov, (1.0, 1.0))  # правка сделана давно — до обхода приложением
+    walk(store, [(B1, "board", (0, 0)), (AP, "ap", (5, 0))], [("A", ROOM_A)], t0=200.0)
+    plan = build_plan(store)
+    assert [r["name"] for r in plan["rooms"]] == ["A"]
+    assert old.id in plan["skipped"] and "overrides" in plan["warnings"]

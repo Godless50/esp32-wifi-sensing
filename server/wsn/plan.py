@@ -79,6 +79,17 @@ def build_plan(store: Store) -> dict:
             continue
         events = _read_jsonl(store.session_dir(s.id) / "events.jsonl")
         walks.append((s, events, *frame_marks(events)))
+    # Обходы приложения (отметки плат и точек доступа) строят план в своих осях (по MAC отмеченных устройств):
+    # если они есть, прежние обходы (старая разметка «плата/роутер») и ручные правки, сделанные до них, в другой
+    # системе координат — их не смешиваем, иначе комнаты и метки зон для обучения съедут.
+    product = [w for w in walks if device_marks(w[1])]
+    product_end = None
+    if product:
+        for w in walks:
+            if not device_marks(w[1]):
+                skipped[w[0].id] = "older walk (before marking with the app)"
+        walks = product
+        product_end = max(s.started_wall + (s.stopped - s.started) for s, *_ in product)
     # обходы с полной системой координат совместимы между собой; без роутера — только если других нет
     have_full = any(o is not None and r is not None for _, _, o, r in walks)
     for s, events, origin, router in walks:
@@ -149,7 +160,9 @@ def build_plan(store: Store) -> dict:
     zones: list[dict] = []
     boards: list[dict] = []
     ov_path = overrides_path(store)
-    if ov_path.exists():
+    if ov_path.exists() and product_end is not None and ov_path.stat().st_mtime < product_end:
+        warnings["overrides"] = "plan_overrides.json is older than the walk recorded with the app; not applied"
+    elif ov_path.exists():
         try:
             ov = json.loads(ov_path.read_text(encoding="utf-8"))
             for name, poly in ov.get("rooms", {}).items():
