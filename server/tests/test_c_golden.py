@@ -100,3 +100,40 @@ def test_c_log_packet():
     p = parse_packet(buf, KEY)
     assert (p.type, p.seq, p.log) == (TYPE_LOG, 13, "romif +0x128 3fc9a000->00000000")
     assert buf == encode_packet(TYPE_LOG, MAC, 0xDEADBEEF, 13, KEY, log=p.log)
+
+
+def test_c_survey_packet():
+    from wsn.protocol import SURVEY_F_CHOSEN, SURVEY_F_UNHEARD, TYPE_SURVEY, Survey, SurveyEntry
+    buf = _lines()[7]
+    p = parse_packet(buf, KEY)
+    assert (p.type, p.seq) == (TYPE_SURVEY, 14)
+    assert p.survey == Survey(3, 100, 3, (SurveyEntry("192.168.4.2", "d8:d6:68:b3:4c:23", 0.95, -56, 100,
+                                                       SURVEY_F_CHOSEN),
+                                          SurveyEntry("192.168.4.28", "", 0.0, 0, 0, SURVEY_F_UNHEARD)))
+    assert p.survey.entries[0].chosen and p.survey.entries[1].unheard and p.survey.state_name == "done"
+    assert buf == encode_packet(TYPE_SURVEY, MAC, 0xDEADBEEF, 14, KEY, survey=p.survey)
+
+
+def hub_cmd_fixture() -> list[str]:
+    from wsn.protocol import CMD_LINKS, CMD_SURVEY, encode_cmd, encode_hub, links_args, survey_args
+    return [encode_hub(MAC, 1_792_000_000, KEY, "192.168.4.23", 5005).hex(),
+            encode_cmd(MAC, 0xDEADBEEF, 9, KEY, CMD_SURVEY, survey_args(60, 6, ["192.168.4.23", "192.168.4.99"])).hex(),
+            encode_cmd(MAC, 0xDEADBEEF, 10, KEY, CMD_LINKS, links_args([("d8:d6:68:b3:4c:23", "192.168.4.2")])).hex()]
+
+
+def test_py_hub_cmd_fixture_is_current():
+    """firmware/components/wsn_proto/test/hub_cmd_test.c parses this fixture with the board's parsers."""
+    fx = (Path(__file__).parent / "golden" / "py_hub_cmd.hex").read_text().split()
+    assert fx == hub_cmd_fixture()
+
+
+def test_hub_cmd_bounds():
+    from wsn.protocol import ProtocolError, encode_hub, links_args, survey_args
+    with pytest.raises(ProtocolError):
+        survey_args(60, 6, [f"10.0.0.{i}" for i in range(17)])
+    with pytest.raises(ProtocolError):
+        survey_args(5)
+    with pytest.raises(ProtocolError):
+        links_args([("d8:d6:68:b3:4c:23", "192.168.4.2")] * 10)
+    with pytest.raises(ProtocolError):
+        encode_hub(MAC, 1, KEY, "192.168.4.300", 5005)

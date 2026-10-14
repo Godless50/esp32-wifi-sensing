@@ -32,6 +32,24 @@ extern "C" {
 #define WSN_DIAG_BT 8          /* backtrace depth of the last panic */
 #define WSN_TYPE_LOG 9         /* board -> server: one line of text (remote debugging of boards away from USB) */
 #define WSN_LOG_MAX 200
+#define WSN_TYPE_HUB 10        /* hub -> board (broadcast to port 5005): send everything to this address.
+                                  boot_id 0 (the board may have rebooted while the hub moved), seq = hub counter:
+                                  the board keeps the last accepted one in flash and drops anything not newer */
+#define WSN_HUB_LEN 6          /* ipv4[4] (network order), port u16 */
+#define WSN_TYPE_CMD 11        /* hub -> board: command bound to the board's current boot (boot_id), seq > last */
+#define WSN_CMD_MAX 96         /* argument bytes */
+#define WSN_CMD_SURVEY 1       /* args: seconds u8, max_links u8, n_excl u8, n_excl x ipv4[4] (hosts to leave out) */
+#define WSN_CMD_LINKS 2        /* args: n u8, n x (mac[6], ipv4[4]): the device links to keep (n = 0: none) */
+#define WSN_CMD_SURVEY_MAX_EXCL 16
+#define WSN_TYPE_SURVEY 12     /* board -> hub: survey of the home network, progress and result */
+#define WSN_SURVEY_MAX 40      /* entries (hosts that answered) */
+#define WSN_SURVEY_ENTRY_LEN 14
+#define WSN_SURVEY_HDR_LEN 3   /* state u8, progress u8 (0..100), responders u8 */
+#define WSN_SURVEY_F_CHOSEN 1      /* became a link of this board */
+#define WSN_SURVEY_F_RANDOM_MAC 2  /* locally administered address: a phone or laptop with a private MAC (moves) */
+#define WSN_SURVEY_F_KNOWN 4       /* already a link: the board's access point or another board */
+#define WSN_SURVEY_F_UNHEARD 8     /* answers on the network, but its own frames never reach this board
+                                      (wired, 5 GHz, another channel or too far) */
 
 typedef void (*wsn_hmac_fn)(const uint8_t *key, size_t key_len, const uint8_t *msg, size_t len,
                             uint8_t out[32]);
@@ -107,6 +125,42 @@ typedef struct {
     uint32_t bt[WSN_DIAG_BT];
 } wsn_diag_t;
 
+typedef struct {
+    uint8_t ip[4];  /* network order: ip[0] is the first number of a.b.c.d */
+    uint16_t port;
+} wsn_hub_t;
+
+typedef struct {
+    uint8_t cmd;          /* WSN_CMD_* */
+    uint8_t len;          /* argument bytes */
+    const uint8_t *args;  /* points into the received datagram */
+} wsn_cmd_t;
+
+typedef enum {
+    WSN_SURVEY_IDLE = 0,
+    WSN_SURVEY_DISCOVER = 1,   /* which hosts answer an echo request */
+    WSN_SURVEY_ATTRIBUTE = 2,  /* which transmitter speaks when each of them is pinged */
+    WSN_SURVEY_DONE = 3,
+    WSN_SURVEY_FAILED = 4,
+} wsn_survey_state_t;
+
+typedef struct {
+    uint8_t ip[4];
+    uint8_t mac[6];   /* transmitter heard when this host is pinged (all zero: none) */
+    uint8_t yield;    /* frames of that transmitter per echo request x100, capped at 255 */
+    int8_t rssi;
+    uint8_t ht;       /* % of its frames with an HT-LTF (more subcarriers) */
+    uint8_t flags;    /* WSN_SURVEY_F_* */
+} wsn_survey_entry_t;
+
+typedef struct {
+    uint8_t state;       /* wsn_survey_state_t */
+    uint8_t progress;    /* 0..100 */
+    uint8_t responders;  /* hosts that answered (may exceed n when more than WSN_SURVEY_MAX answered) */
+    uint8_t n;
+    wsn_survey_entry_t e[WSN_SURVEY_MAX];
+} wsn_survey_t;
+
 /* Number of leading frames that fit into one datagram (<= WSN_MAX_DATAGRAM, <= WSN_MAX_FRAMES). */
 size_t wsn_frames_fit(const wsn_csi_frame_t *frames, size_t n);
 
@@ -131,6 +185,15 @@ int wsn_encode_log(wsn_ctx_t *ctx, const char *text, uint8_t *out, size_t cap);
  * ctx->key and carry ctx->boot_id (binds it to this boot: an old capture can not be replayed after a reboot).
  * *seq receives the server sequence number (caller rejects seq <= last). Returns 0 or a negative error. */
 int wsn_parse_model_chunk(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_model_chunk_t *out);
+
+/* Encode the survey report (WSN_TYPE_SURVEY). Same return convention; -5 = n > WSN_SURVEY_MAX. */
+int wsn_encode_survey(wsn_ctx_t *ctx, const wsn_survey_t *s, uint8_t *out, size_t cap);
+/* Verify and parse a hub announcement (WSN_TYPE_HUB): addressed to ctx->device_id, signed with ctx->key,
+ * boot_id 0. *seq receives the hub counter (caller drops seq <= the last one it accepted). 0 or negative error. */
+int wsn_parse_hub(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_hub_t *out);
+/* Verify and parse a hub command (WSN_TYPE_CMD): addressed to ctx->device_id, signed, carrying ctx->boot_id.
+ * *seq receives the hub sequence number (caller drops seq <= last). Returns 0 or a negative error. */
+int wsn_parse_cmd(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_cmd_t *out);
 
 #ifdef __cplusplus
 }

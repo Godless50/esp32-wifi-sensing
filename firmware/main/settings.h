@@ -9,6 +9,8 @@
 uint32_t wsn_fw_id(void);
 /* Дополнительные передатчики: узлы mesh, устройства квартиры и другие наши платы (их пинги роутеру — 100 Гц). */
 #define WSN_MAX_LINKS 14
+/* Из них устройства дома, найденные опросом сети (survey.c): плата сама пингует их, остальное место — другим платам. */
+#define WSN_MAX_DEVICE_LINKS 8
 
 typedef struct {
     char ssid[33];
@@ -21,11 +23,14 @@ typedef struct {
     uint8_t csi_source; /* 0 = ht, 1 = lltf */
     uint8_t n_links;    /* extra transmitters whose CSI is forwarded (promiscuous mode) */
     uint8_t links[WSN_MAX_LINKS][6];
-    uint8_t promisc;    /* 1 = прослушивание эфира для чужих передатчиков (роняет библиотеку Wi-Fi), 0 = нет */
+    uint32_t link_ip[WSN_MAX_LINKS]; /* адрес устройства, которое плата пингует ради этой линии (0 = не пинговать) */
+    uint8_t promisc;    /* 1 = прослушивание эфира: кадры устройств дома (только одиночные кадры, без A-MPDU) */
     uint8_t beacon_hz;  /* широковещательные кадры ESP-NOW для линий плата -> плата (0 = нет) */
+    uint8_t tgt_hz;     /* сколько раз в секунду пинговать каждое устройство-линию */
+    uint32_t hub_seq;   /* последнее принятое объявление центра (WSN_TYPE_HUB): старые не принимаются */
 } wsn_settings_t;
 
-/* Missing fields get defaults: port=5005, ping_hz=100, csi_source=0. */
+/* Missing fields get defaults: port=5005, ping_hz=100, csi_source=0, tgt_hz=20. */
 esp_err_t settings_load(wsn_settings_t *out);
 esp_err_t settings_save(const wsn_settings_t *s);
 /* Monotonic boot counter kept in NVS: increments and returns the new value (>= 1). 0 on NVS error. */

@@ -1,5 +1,6 @@
 #include "uplink.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,12 +13,14 @@
 #include "esp_timer.h"
 #include "guard.h"
 #include "infer.h"
+#include "memguard.h"
 #include "model_ota.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "mbedtls/md.h"
 #include "panic_trace.h"
 #include "ping_gen.h"
+#include "survey.h"
 #include "wifi_mgr.h"
 #include "wsn_proto.h"
 
@@ -82,6 +85,8 @@ static void hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *msg, 
 
 float uplink_csi_hz(void) { return s_csi_hz; }
 
+#define LISTEN_PORT 5005 /* центр (телефон) рассылает свой адрес широковещательно на этот порт */
+
 static int open_socket(struct sockaddr_in *dst)
 {
     struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_DGRAM};
@@ -90,7 +95,66 @@ static int open_socket(struct sockaddr_in *dst)
     *dst = *(struct sockaddr_in *)res->ai_addr;
     dst->sin_port = htons(s_cfg.port);
     freeaddrinfo(res);
-    return socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    survey_set_hub(dst->sin_addr.s_addr);
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) return sock;
+    int one = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
+    struct sockaddr_in me = {.sin_family = AF_INET, .sin_port = htons(LISTEN_PORT), .sin_addr.s_addr = INADDR_ANY};
+    if (bind(sock, (struct sockaddr *)&me, sizeof(me)) != 0)  /* без этого объявления центра не дойдут */
+        ESP_LOGW(TAG, "bind :%d failed (errno %d): hub announcements will not reach this board", LISTEN_PORT, errno);
+    return sock;
+}
+
+/* Hub announcement: from now on send to ip:port. Stored when the address changes (the board must find the hub
+ * after a reboot); seq protects from replays of old announcements. */
+static bool on_hub(const wsn_hub_t *h, uint32_t seq, struct sockaddr_in *dst)
+{
+    if (seq <= s_cfg.hub_seq) return false;
+    s_cfg.hub_seq = seq;
+    char host[16];
+    snprintf(host, sizeof(host), "%u.%u.%u.%u", h->ip[0], h->ip[1], h->ip[2], h->ip[3]);
+    if (strcmp(host, s_cfg.host) == 0 && h->port == s_cfg.port) return false;
+    strlcpy(s_cfg.host, host, sizeof(s_cfg.host));
+    s_cfg.port = h->port;
+    memcpy(&dst->sin_addr.s_addr, h->ip, 4);
+    dst->sin_port = htons(h->port);
+    survey_set_hub(dst->sin_addr.s_addr);
+    static wsn_settings_t st;
+    csi_capture_flash_begin();
+    esp_err_t err = settings_load(&st);
+    if (err == ESP_OK) {
+        strlcpy(st.host, host, sizeof(st.host));
+        st.port = h->port;
+        st.hub_seq = seq;
+        err = settings_save(&st);
+    }
+    csi_capture_flash_end();
+    ESP_LOGI(TAG, "hub moved: %s:%u (%s)", host, h->port, err == ESP_OK ? "stored" : esp_err_to_name(err));
+    return true;
+}
+
+static void on_cmd(const wsn_cmd_t *c)
+{
+    if (c->cmd == WSN_CMD_SURVEY && c->len >= 3 && c->args[2] <= WSN_CMD_SURVEY_MAX_EXCL &&
+        c->len == 3u + 4u * c->args[2]) {
+        survey_args_t a = {.seconds = c->args[0], .max_links = c->args[1], .n_excl = c->args[2], .apply = true};
+        memcpy(a.excl, c->args + 3, 4u * a.n_excl);
+        esp_err_t err = survey_start(&a);
+        if (err != ESP_OK) ESP_LOGW(TAG, "survey: %s", esp_err_to_name(err));
+    } else if (c->cmd == WSN_CMD_LINKS && c->len >= 1 && c->args[0] <= WSN_MAX_DEVICE_LINKS &&
+               c->len == 1u + 10u * c->args[0]) {
+        uint8_t macs[WSN_MAX_DEVICE_LINKS][6];
+        uint32_t ips[WSN_MAX_DEVICE_LINKS];
+        for (int i = 0; i < c->args[0]; i++) {
+            memcpy(macs[i], c->args + 1 + 10 * i, 6);
+            memcpy(&ips[i], c->args + 7 + 10 * i, 4);
+        }
+        survey_set_links(macs, ips, c->args[0]);
+    } else {
+        ESP_LOGW(TAG, "unknown or malformed command %u (%u bytes)", c->cmd, c->len);
+    }
 }
 
 static void send_pkt(int sock, const struct sockaddr_in *dst, const uint8_t *buf, int len)
@@ -149,7 +213,7 @@ static void uplink_task(void *arg)
         if (infer_take(&pred)) send_pkt(sock, &dst, out, wsn_encode_pred(&ctx, &pred, out, sizeof(out)));
         if (sock >= 0) {  /* от сервера: куски новой модели (подписаны, привязаны к этой загрузке) и «зонд» */
             static uint8_t rx[WSN_MAX_DATAGRAM];
-            static uint32_t last_seq;
+            static uint32_t last_seq, last_cmd_seq;
             /* Сервер шлёт каждой плате ~100 крошечных датаграмм «WSNS» в секунду: их передаёт плате её точка
              * доступа, и каждая — замер CSI линии «точка доступа -> плата». Читаем всё, что накопилось, иначе
              * при одном чтении за проход (~10 мс) куски модели ждали бы в очереди за зондами. */
@@ -162,14 +226,29 @@ static void uplink_task(void *arg)
                 }
                 wsn_model_chunk_t ch;
                 uint32_t seq;
-                if (wsn_parse_model_chunk(&ctx, rx, (size_t)r, &seq, &ch) == 0 && seq > last_seq) {
-                    last_seq = seq;
-                    model_ota_feed(&ch);
+                if (r < WSN_HEADER_LEN) continue;
+                if (rx[5] == WSN_TYPE_MODEL_CHUNK) {
+                    if (wsn_parse_model_chunk(&ctx, rx, (size_t)r, &seq, &ch) == 0 && seq > last_seq) {
+                        last_seq = seq;
+                        model_ota_feed(&ch);
+                    }
+                } else if (rx[5] == WSN_TYPE_HUB) {
+                    wsn_hub_t hub;
+                    if (wsn_parse_hub(&ctx, rx, (size_t)r, &seq, &hub) == 0 && on_hub(&hub, seq, &dst))
+                        next_diag = 0;  /* новый центр: история перезапусков сразу */
+                } else if (rx[5] == WSN_TYPE_CMD) {
+                    wsn_cmd_t cmd;
+                    if (wsn_parse_cmd(&ctx, rx, (size_t)r, &seq, &cmd) == 0 && seq > last_cmd_seq) {
+                        last_cmd_seq = seq;
+                        on_cmd(&cmd);
+                    }
                 }
             }
         }
         wsn_model_ack_t ack;
         if (model_ota_status(&ack)) send_pkt(sock, &dst, out, wsn_encode_model_ack(&ctx, &ack, out, sizeof(out)));
+        static wsn_survey_t sv;
+        if (sock >= 0 && survey_report(&sv)) send_pkt(sock, &dst, out, wsn_encode_survey(&ctx, &sv, out, sizeof(out)));
         if (sock >= 0) {
             static char line[WSN_LOG_MAX + 1];
             if (log_pop(line)) send_pkt(sock, &dst, out, wsn_encode_log(&ctx, line, out, sizeof(out)));
@@ -218,6 +297,12 @@ static void uplink_task(void *arg)
                 diag_get(&d);
                 send_pkt(sock, &dst, out, wsn_encode_diag(&ctx, &d, out, sizeof(out)));
                 next_diag = now + DIAG_EVERY_US;
+            }
+            static uint32_t guarded;
+            uint32_t caller, g = memguard_skipped(&caller);
+            if (g != guarded) {  /* библиотека Wi-Fi пыталась скопировать кадр отрицательной длины: пропущено */
+                uplink_log("memguard: %lu bad copies skipped (last from 0x%08lx)", (unsigned long)g, (unsigned long)caller);
+                guarded = g;
             }
             if (c.overflow != prev.overflow)
                 ESP_LOGW(TAG, "ring overflow: %lu frames lost", (unsigned long)(c.overflow - prev.overflow));

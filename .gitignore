@@ -29,3 +29,4 @@ firmware/build_debug/
 deploy/.env
 .fwbuild.log
 android/.kotlin/
+firmware/components/wsn_proto/test/hub_cmd_test

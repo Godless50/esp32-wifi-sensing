@@ -16,6 +16,7 @@ from .model_push import ModelPusher
 from .recorder import Recorder
 from .sounder import Sounder
 from .store import Store
+from .survey import SurveyControl
 from .zonemodel import LiveInfer
 
 
@@ -42,9 +43,11 @@ def main() -> None:
     def on_packet(p, recv_t: float) -> None:
         hub.on_packet(p, recv_t)
         pusher.on_packet(p, recv_t)
+        survey.on_packet(p, recv_t)
 
     ingest = IngestService(keys, on_packet, state_path=data / "boot_state.json", on_raw=on_raw)
     pusher = ModelPusher(keys, ingest)
+    survey = SurveyControl(keys, ingest, pusher)  # опрос сети платой: устройства дома как линии
     def default_device() -> str | None:
         """The board that streamed most recently (within 10 s): the one a phone session records."""
         live = [d for d in hub.devices() if d.age_s < 10]
@@ -56,7 +59,8 @@ def main() -> None:
     # модель квартиры (train.sh -> data/model): сервер подхватывает новую сам, без перезапуска
     infer = LiveInfer(data / "model", hub.publish, state_path=data / "run" / "link_floors.json")
     app = create_app(hub, ingest, ui, udp_port=udp_port, store=store, recorder=recorder,
-                     default_device=default_device, pinger=pinger, pusher=pusher, sounder=sounder, infer=infer)
+                     default_device=default_device, pinger=pinger, pusher=pusher, sounder=sounder, infer=infer,
+                     survey=survey)
     uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
 
 

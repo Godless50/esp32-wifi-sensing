@@ -13,6 +13,7 @@
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "csi_capture.h"
+#include "survey.h"
 #include "wifi_mgr.h"
 #include "wsn_util.h"
 
@@ -167,11 +168,27 @@ static uint8_t s_new_n;
 static void set_links(wsn_settings_t *s, char **argv)
 {
     memcpy(s->links, s_new_links, sizeof(s->links));
+    memset(s->link_ip, 0, sizeof(s->link_ip));  /* заданные вручную линии плата не пингует */
     s->n_links = s_new_n;
 }
 
 static int cmd_links(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "show") == 0) {
+        wsn_settings_t st;
+        if (settings_load(&st) != ESP_OK) {
+            puts("ERR nvs");
+            return 1;
+        }
+        for (int i = 0; i < st.n_links; i++) {
+            char m[18];
+            wsn_format_mac(st.links[i], m);
+            const uint8_t *ip = (const uint8_t *)&st.link_ip[i];
+            printf("LINK %s ping=%u.%u.%u.%u\n", m, ip[0], ip[1], ip[2], ip[3]);
+        }
+        printf("LINK_END n=%u promisc=%u tgt_hz=%u\n", st.n_links, st.promisc, st.tgt_hz);
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "clear") == 0) {
         s_new_n = 0;
         memset(s_new_links, 0, sizeof(s_new_links));
@@ -230,6 +247,26 @@ static int cmd_csi_src(int argc, char **argv)
     return 0;
 }
 
+/* survey [seconds] [max_links] | survey show — find home devices that give this board extra links. */
+static int cmd_survey(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "show") == 0) {
+        survey_print();
+        return 0;
+    }
+    survey_args_t a = {.seconds = 60, .max_links = 6, .apply = true};
+    if (argc >= 2) a.seconds = (uint8_t)atoi(argv[1]);
+    if (argc >= 3) a.max_links = (uint8_t)atoi(argv[2]);
+    if (argc > 3 || (argc >= 2 && (atoi(argv[1]) < 20 || atoi(argv[1]) > 255)) ||
+        (argc >= 3 && (atoi(argv[2]) < 0 || atoi(argv[2]) > WSN_MAX_DEVICE_LINKS))) {
+        printf("ERR usage: survey [20..255 s] [0..%d links] | survey show\n", WSN_MAX_DEVICE_LINKS);
+        return 1;
+    }
+    esp_err_t err = survey_start(&a);
+    printf("%s survey %s\n", err == ESP_OK ? "OK" : "ERR", esp_err_to_name(err));
+    return err != ESP_OK;
+}
+
 /* scan — APs on all channels (briefly interrupts CSI). */
 static int cmd_scan(int argc, char **argv)
 {
@@ -280,7 +317,8 @@ esp_err_t console_start(const wsn_settings_t *active, csi_hz_fn_t csi_hz)
         {.command = "crash", .help = "crash abort|fault (test of the crash record)", .func = cmd_crash},
         {.command = "dl", .help = "reboot into download mode (for flashing)", .func = cmd_dl},
         {.command = "reboot", .help = "restart", .func = cmd_reboot},
-        {.command = "links", .help = "links set <mac,...> | links clear", .func = cmd_links},
+        {.command = "links", .help = "links set <mac,...> | links clear | links show", .func = cmd_links},
+        {.command = "survey", .help = "survey [seconds] [max_links] | survey show: home devices as links", .func = cmd_survey},
         {.command = "promisc", .help = "promisc on|all|off (runtime; on = MPDU only)", .func = cmd_promisc},
         {.command = "csi_src", .help = "csi_src [reset]: CSI per transmitter", .func = cmd_csi_src},
         {.command = "scan", .help = "scan access points", .func = cmd_scan},

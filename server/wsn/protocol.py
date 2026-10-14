@@ -21,6 +21,19 @@ DIAG_MSG = 47
 DIAG_BT = 8
 TYPE_LOG = 9          # плата -> сервер: строка текста (отладка плат вдали от USB)
 LOG_MAX = 200
+TYPE_HUB = 10         # центр -> плата (широковещательно на 5005): куда слать данные; boot_id 0, seq растёт
+TYPE_CMD = 11         # центр -> плата: команда этой загрузке платы (boot_id), seq растёт
+TYPE_SURVEY = 12      # плата -> центр: опрос домашней сети — ход и итог
+CMD_SURVEY = 1        # секунды u8, сколько линий u8, n u8, n x IPv4 — кого не трогать
+CMD_LINKS = 2         # n u8, n x (MAC, IPv4): какие устройства оставить линиями (n = 0: никаких)
+CMD_MAX = 96
+CMD_SURVEY_MAX_EXCL = 16
+SURVEY_MAX = 40
+SURVEY_STATES = {0: "idle", 1: "discover", 2: "attribute", 3: "done", 4: "failed"}
+SURVEY_F_CHOSEN = 1       # стало линией этой платы
+SURVEY_F_RANDOM_MAC = 2   # случайный (локальный) MAC: телефон или ноутбук — носят по квартире
+SURVEY_F_KNOWN = 4        # уже линия: точка доступа платы или другая плата
+SURVEY_F_UNHEARD = 8      # отвечает по сети, но его собственных кадров плата не слышит (провод, 5 ГГц, далеко)
 MODEL_CHUNK_MAX = 1024
 CSI_TYPES = (TYPE_CSI, TYPE_CSI_SRC)
 HEADER_LEN = 21
@@ -35,6 +48,9 @@ _CHUNK = struct.Struct("<IIIH")
 _ACK = struct.Struct("<IIBBB")
 _DIAG = struct.Struct("<IIIBBB")
 _DIAG_TAIL = struct.Struct("<BBBBI")
+_SURVEY = struct.Struct("<BBB")
+_SURVEY_ENTRY = struct.Struct("<4s6sBbBB")
+assert _SURVEY_ENTRY.size == 14
 assert _HEADER.size == HEADER_LEN and _FRAME.size == 14 and _TELEM.size == 30 and _PRED.size == 17
 
 
@@ -140,6 +156,52 @@ class Diag:
 
 
 @dataclass(frozen=True)
+class SurveyEntry:
+    """A host that answered the board's echo requests during the survey. mac: the transmitter the board heard
+    when this host was pinged ("" = none). per_ping: its CSI frames per echo request."""
+    ip: str
+    mac: str
+    per_ping: float
+    rssi: int
+    ht: int
+    flags: int
+
+    @property
+    def chosen(self) -> bool:
+        return bool(self.flags & SURVEY_F_CHOSEN)
+
+    @property
+    def random_mac(self) -> bool:
+        return bool(self.flags & SURVEY_F_RANDOM_MAC)
+
+    @property
+    def known(self) -> bool:
+        return bool(self.flags & SURVEY_F_KNOWN)
+
+    @property
+    def unheard(self) -> bool:
+        return bool(self.flags & SURVEY_F_UNHEARD)
+
+
+@dataclass(frozen=True)
+class Survey:
+    state: int
+    progress: int
+    responders: int
+    entries: tuple[SurveyEntry, ...] = ()
+
+    @property
+    def state_name(self) -> str:
+        return SURVEY_STATES.get(self.state, str(self.state))
+
+    def summary(self) -> dict:
+        return {"state": self.state_name, "progress": self.progress, "responders": self.responders,
+                "entries": [{"ip": e.ip, "mac": e.mac, "per_ping": e.per_ping, "rssi": e.rssi, "ht": e.ht,
+                             "chosen": e.chosen, "random_mac": e.random_mac, "known": e.known,
+                             "unheard": e.unheard} for e in self.entries]}
+
+
+@dataclass(frozen=True)
 class Packet:
     type: int
     device_id: str
@@ -151,6 +213,7 @@ class Packet:
     model_ack: ModelAck | None = None
     diag: Diag | None = None
     log: str | None = None
+    survey: Survey | None = None
 
 
 def _mac_str(raw: bytes) -> str:
@@ -162,6 +225,17 @@ def _mac_bytes(mac: str) -> bytes:
     if len(parts) != 6:
         raise ProtocolError(f"bad mac {mac!r}")
     return bytes(int(p, 16) for p in parts)
+
+
+def _ip_bytes(ip: str) -> bytes:
+    parts = ip.split(".")
+    if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        raise ProtocolError(f"bad ipv4 {ip!r}")
+    return bytes(int(p) for p in parts)
+
+
+def _ip_str(raw: bytes) -> str:
+    return ".".join(str(b) for b in raw)
 
 
 def _sign(key: bytes, body: bytes) -> bytes:
@@ -197,6 +271,7 @@ def parse_packet(buf: bytes, key: bytes | None, verify: bool = True) -> Packet:
     model_ack: ModelAck | None = None
     diag: Diag | None = None
     text: str | None = None
+    survey: Survey | None = None
     if ptype in CSI_TYPES:
         for _ in range(n):
             if off + _FRAME.size > len(body):
@@ -264,11 +339,22 @@ def parse_packet(buf: bytes, key: bytes | None, verify: bool = True) -> Packet:
             raise ProtocolError("length: log")
         text = bytes(body[off + 1 : off + 1 + body[off]]).decode("utf-8", "replace")
         off += 1 + body[off]
+    elif ptype == TYPE_SURVEY:
+        if n > SURVEY_MAX or off + _SURVEY.size + n * _SURVEY_ENTRY.size != len(body):
+            raise ProtocolError("length: survey")
+        st, prog, resp = _SURVEY.unpack_from(body, off)
+        off += _SURVEY.size
+        entries = []
+        for _ in range(n):
+            ip, mac, y, rssi, ht, fl = _SURVEY_ENTRY.unpack_from(body, off)
+            off += _SURVEY_ENTRY.size
+            entries.append(SurveyEntry(_ip_str(ip), "" if mac == bytes(6) else _mac_str(mac), y / 100, rssi, ht, fl))
+        survey = Survey(st, prog, resp, tuple(entries))
     else:
         raise ProtocolError(f"unsupported type {ptype}")
     if off != len(body):
         raise ProtocolError("length: trailing bytes")
-    return Packet(ptype, _mac_str(dev), boot_id, seq, frames, telemetry, prediction, model_ack, diag, text)
+    return Packet(ptype, _mac_str(dev), boot_id, seq, frames, telemetry, prediction, model_ack, diag, text, survey)
 
 
 def encode_packet(
@@ -282,6 +368,7 @@ def encode_packet(
     prediction: Prediction | None = None,
     diag: Diag | None = None,
     log: str | None = None,
+    survey: Survey | None = None,
 ) -> bytes:
     parts: list[bytes] = []
     if type in CSI_TYPES:
@@ -329,6 +416,16 @@ def encode_packet(
         n = 1
         t = log.encode()[:LOG_MAX]
         parts.append(bytes([len(t)]) + t)
+    elif type == TYPE_SURVEY:
+        if survey is None:
+            raise ProtocolError("survey required")
+        n = len(survey.entries)
+        if n > SURVEY_MAX:
+            raise ProtocolError("survey too long")
+        parts.append(_SURVEY.pack(survey.state, survey.progress, survey.responders))
+        for e in survey.entries:
+            parts.append(_SURVEY_ENTRY.pack(_ip_bytes(e.ip), _mac_bytes(e.mac) if e.mac else bytes(6),
+                                            min(255, round(e.per_ping * 100)), e.rssi, e.ht, e.flags))
     else:
         raise ProtocolError(f"unsupported type {type}")
     body = _HEADER.pack(MAGIC, VERSION, type, _mac_bytes(device_id), boot_id, seq, n) + b"".join(parts)
@@ -346,3 +443,38 @@ def encode_model_chunk(device_id: str, board_boot_id: int, seq: int, key: bytes,
     body = (_HEADER.pack(MAGIC, VERSION, TYPE_MODEL_CHUNK, _mac_bytes(device_id), board_boot_id, seq, 1)
             + _CHUNK.pack(version, total, offset, len(data)) + data)
     return body + _sign(key, body)
+
+
+def encode_hub(device_id: str, seq: int, key: bytes, ip: str, port: int) -> bytes:
+    """Hub -> board: send everything to ip:port from now on. Not bound to a boot (boot_id 0); seq must grow
+    across the hub's whole life (the board keeps the last accepted one in flash): use unix time."""
+    if not 0 < port < 65536:
+        raise ProtocolError("port")
+    body = (_HEADER.pack(MAGIC, VERSION, TYPE_HUB, _mac_bytes(device_id), 0, seq, 1)
+            + _ip_bytes(ip) + struct.pack("<H", port))
+    return body + _sign(key, body)
+
+
+def encode_cmd(device_id: str, board_boot_id: int, seq: int, key: bytes, cmd: int, args: bytes = b"") -> bytes:
+    """Hub -> board command for the board's current boot (header boot_id), seq strictly increasing."""
+    if len(args) > CMD_MAX:
+        raise ProtocolError("command args too long")
+    body = (_HEADER.pack(MAGIC, VERSION, TYPE_CMD, _mac_bytes(device_id), board_boot_id, seq, 1)
+            + bytes([cmd, len(args)]) + args)
+    return body + _sign(key, body)
+
+
+def survey_args(seconds: int = 60, max_links: int = 6, exclude: list[str] | tuple[str, ...] = ()) -> bytes:
+    """Arguments of CMD_SURVEY: how long, how many links to keep, hosts to leave out (e.g. phones)."""
+    if len(exclude) > CMD_SURVEY_MAX_EXCL:
+        raise ProtocolError("too many excluded hosts")
+    if not 10 <= seconds <= 255 or not 0 <= max_links <= 8:
+        raise ProtocolError("survey bounds")
+    return bytes([seconds, max_links, len(exclude)]) + b"".join(_ip_bytes(ip) for ip in exclude)
+
+
+def links_args(links: list[tuple[str, str]] | tuple[tuple[str, str], ...]) -> bytes:
+    """Arguments of CMD_LINKS: (transmitter MAC, IPv4 to ping) of every device link the board keeps."""
+    if len(links) > 9:
+        raise ProtocolError("too many links")
+    return bytes([len(links)]) + b"".join(_mac_bytes(m) + _ip_bytes(ip) for m, ip in links)

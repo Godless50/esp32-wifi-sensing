@@ -17,7 +17,7 @@ typedef struct {
     uint32_t rssi_n;
 } csi_counters_t;
 
-#define CSI_SRC_MAX 24
+#define CSI_SRC_MAX 48 /* опрос сети: в квартире на канале слышно 20-30 передатчиков */
 
 typedef struct {
     uint8_t mac[6];
@@ -35,9 +35,25 @@ esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const ui
 void csi_capture_counters(csi_counters_t *out);
 /* Add a transmitter (another board heard over ESP-NOW) to the captured links; false if known, full or not started. */
 bool csi_capture_add_link(const uint8_t mac[6]);
+
+#define CSI_LINK_AP 0
+#define CSI_LINK_BOARD 1
+#define CSI_LINK_DEVICE 2
+/* Kind of link of a transmitter (CSI_LINK_*), -1 = not a link. */
+int csi_capture_link_kind(const uint8_t mac[6]);
+/* Replace the device links (home devices found by the survey); the access point and the boards stay.
+ * Returns how many were added (duplicates and overflow are dropped). Thread-safe. */
+size_t csi_capture_set_device_links(const uint8_t (*macs)[6], size_t n);
+/* Sniffer (promiscuous mode, single MPDU frames only) on/off at run time. */
+esp_err_t csi_capture_set_promisc(bool on);
+bool csi_capture_promisc(void);
 /* Pop next frame; data copied into data_buf (>= CSI_MAX_LEN), out->data points to it. */
 bool csi_capture_pop(wsn_csi_frame_t *out, int8_t *data_buf, TickType_t wait);
 /* Stop / restart CSI and the Wi-Fi sniffer around flash writes: a flash write while the sniffer copies a frame
  * crashed the boards ("Cache disabled but cached memory region accessed" in wDev_SnifferRxData). */
 void csi_capture_pause(void);
 void csi_capture_resume(void);
+/* The same around a settings write, serialised between tasks (survey results, hub address): begin waits for
+ * another writer to finish. */
+void csi_capture_flash_begin(void);
+void csi_capture_flash_end(void);

@@ -19,8 +19,9 @@ esp_err_t settings_load(wsn_settings_t *out)
     out->port = 5005;
     out->ping_hz = 100;
     out->csi_source = 0;
-    out->promisc = 0;     /* прослушивание эфира роняет библиотеку Wi-Fi (13.10); линии между платами — через ESP-NOW */
+    out->promisc = 0;     /* включает опрос сети, когда находит устройства-линии (survey.c) */
     out->beacon_hz = 50;
+    out->tgt_hz = 20;
     nvs_handle_t h;
     esp_err_t err = nvs_open(NS, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK; /* first boot */
@@ -42,6 +43,12 @@ esp_err_t settings_load(wsn_settings_t *out)
     nvs_get_u8(h, "beacon_hz", &out->beacon_hz);
     len = sizeof(out->links);
     if (nvs_get_blob(h, "links", out->links, &len) == ESP_OK) out->n_links = (uint8_t)(len / 6);
+    len = sizeof(out->link_ip);
+    if (nvs_get_blob(h, "link_ip", out->link_ip, &len) != ESP_OK || len != 4u * out->n_links)
+        memset(out->link_ip, 0, sizeof(out->link_ip));  /* линии старого вида (сервер пинговал сам): не пинговать */
+    nvs_get_u8(h, "tgt_hz", &out->tgt_hz);
+    if (out->tgt_hz < 1 || out->tgt_hz > 50) out->tgt_hz = 20;
+    nvs_get_u32(h, "hub_seq", &out->hub_seq);
     nvs_close(h);
     return ESP_OK;
 }
@@ -61,10 +68,15 @@ esp_err_t settings_save(const wsn_settings_t *s)
     if (!err) err = nvs_set_u8(h, "csi_src", s->csi_source);
     if (!err) err = nvs_set_u8(h, "promisc", s->promisc);
     if (!err) err = nvs_set_u8(h, "beacon_hz", s->beacon_hz);
+    if (!err) err = nvs_set_u8(h, "tgt_hz", s->tgt_hz);
+    if (!err) err = nvs_set_u32(h, "hub_seq", s->hub_seq);
     if (!err && s->n_links) err = nvs_set_blob(h, "links", s->links, (size_t)s->n_links * 6);
+    if (!err && s->n_links) err = nvs_set_blob(h, "link_ip", s->link_ip, (size_t)s->n_links * 4);
     if (!err && !s->n_links) {
         esp_err_t e = nvs_erase_key(h, "links");
         err = (e == ESP_ERR_NVS_NOT_FOUND) ? ESP_OK : e;
+        e = nvs_erase_key(h, "link_ip");
+        if (!err && e != ESP_ERR_NVS_NOT_FOUND) err = e;
     }
     if (!err) err = nvs_commit(h);
     nvs_close(h);

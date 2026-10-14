@@ -227,6 +227,8 @@ void app_main(void)
     fw_check_pending();
     ESP_LOGI(TAG, "reset reason %s", diag_reason_str(s_diag[0]));
     ESP_ERROR_CHECK(settings_load(&s_settings));
+    /* устройства-линии из опроса сети: плата пингует их сама (сокет откроется, когда будет IP) */
+    ping_gen_set_targets(s_settings.link_ip, s_settings.n_links, s_settings.tgt_hz);
     diag_stage(2);
     uint32_t boot_id = settings_next_boot_id();
     diag_stage(3);

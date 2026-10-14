@@ -101,6 +101,23 @@ class StartSession(BaseModel):
     device_id: str
     duration_s: float | None = None
 
+class SurveyReq(BaseModel):
+    device_id: str
+    seconds: int = 60
+    max_links: int = 6
+    exclude: list[str] = []
+
+
+class SurveyLink(BaseModel):
+    mac: str
+    ip: str
+
+
+class SurveyLinksReq(BaseModel):
+    device_id: str
+    links: list[SurveyLink] = []
+
+
 PLAN_REFRESH_S = 60.0
 
 def create_app(
@@ -115,6 +132,7 @@ def create_app(
     pusher=None,
     sounder=None,
     infer=None,
+    survey=None,
 ) -> FastAPI:
     ui_dir = Path(ui_dir)
     tracker = RoomTracker()
@@ -341,6 +359,32 @@ def create_app(
     @app.get("/api/model/push")
     def model_push_status() -> dict:
         return {"pushes": pusher.status() if pusher is not None else []}
+
+    @app.post("/api/survey")
+    def survey_start(req: SurveyReq) -> dict:
+        """The board pings the hosts of the home network one at a time for ~seconds and keeps up to max_links
+        devices it hears well as its links. Result: GET /api/survey."""
+        if survey is None:
+            raise HTTPException(503, "survey disabled")
+        try:
+            return survey.start(req.device_id, req.seconds, req.max_links, req.exclude)
+        except (RuntimeError, ValueError) as e:
+            raise HTTPException(409, str(e)) from e
+
+    @app.get("/api/survey")
+    def survey_status() -> dict:
+        return survey.status() if survey is not None else {"surveys": {}}
+
+    @app.post("/api/survey/links")
+    def survey_links(req: SurveyLinksReq) -> dict:
+        """Keep exactly these device links on the board (empty list: none, sniffer off)."""
+        if survey is None:
+            raise HTTPException(503, "survey disabled")
+        try:
+            survey.set_links(req.device_id, [(x.mac, x.ip) for x in req.links])
+        except (RuntimeError, ValueError) as e:
+            raise HTTPException(409, str(e)) from e
+        return {"ok": True}
 
     @app.post("/api/predict")
     def add_prediction(req: Prediction) -> dict:

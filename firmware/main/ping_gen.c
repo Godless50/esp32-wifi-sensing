@@ -1,5 +1,6 @@
-/* ICMP echo requests to the gateway at a fixed rate; every reply is a frame from the access point, so it carries
- * CSI of the link "access point -> board".
+/* ICMP echo requests at fixed rates: to the gateway (every reply is a frame from the access point, so it carries
+ * CSI of the link "access point -> board") and to the home devices found by the survey (each reply is a frame of
+ * that device: the link "device -> board", heard with the sniffer on).
  *
  * The rate does not depend on the round trip: requests go out on a timer and replies are only drained. esp_ping
  * (used before) waits for each reply, so through a mesh node (round trip 30-40 ms) 100 Hz became ~25 Hz, and it
@@ -10,6 +11,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -20,21 +22,41 @@
 static const char *TAG = "ping_gen";
 
 #define PAYLOAD 16
+#define ICMP_ID 0x5753 /* "WS" */
 
 static TaskHandle_t s_task;
 static SemaphoreHandle_t s_lock;
 static volatile uint32_t s_gw;  /* 0 = stopped */
 static volatile uint16_t s_hz;
-static volatile uint32_t s_gen; /* bumped on every start: the task restarts its timing */
+static volatile uint32_t s_gen; /* bumped on every change: the task re-reads the schedule */
+static uint32_t s_tgt[PING_GEN_MAX_TARGETS];
+static size_t s_tgt_n;
+static uint16_t s_tgt_hz = 20;
+
+static void send_echo(int sock, uint32_t addr, uint16_t seq)
+{
+    uint8_t pkt[sizeof(struct icmp_echo_hdr) + PAYLOAD];
+    struct icmp_echo_hdr *h = (struct icmp_echo_hdr *)pkt;
+    memset(pkt, 0, sizeof(pkt));
+    h->type = ICMP_ECHO;
+    h->id = ICMP_ID;
+    h->seqno = lwip_htons(seq);
+    for (int i = 0; i < PAYLOAD; i++) pkt[sizeof(*h) + i] = (uint8_t)i;
+    h->chksum = inet_chksum(pkt, sizeof(pkt));
+    struct sockaddr_in to = {.sin_family = AF_INET, .sin_addr.s_addr = addr};
+    sendto(sock, pkt, sizeof(pkt), 0, (struct sockaddr *)&to, sizeof(to)); /* очередь полна — уйдёт следующий */
+}
 
 static void ping_task(void *arg)
 {
     int sock = -1;
     uint32_t gen = 0;
     uint16_t seq = 0;
-    uint8_t pkt[sizeof(struct icmp_echo_hdr) + PAYLOAD];
     uint8_t rx[128];
-    TickType_t last = xTaskGetTickCount();
+    /* расписание: [0] — шлюз, [1..] — устройства; время следующей отправки в мкс */
+    uint32_t addr[1 + PING_GEN_MAX_TARGETS];
+    int64_t due[1 + PING_GEN_MAX_TARGETS], period[1 + PING_GEN_MAX_TARGETS];
+    size_t n = 0;
     for (;;) {
         if (!s_gw) {
             if (sock >= 0) {
@@ -52,31 +74,50 @@ static void ping_task(void *arg)
                 continue;
             }
         }
-        if (gen != s_gen) {
+        int64_t now = esp_timer_get_time();
+        if (gen != s_gen) {  /* новое расписание: устройства вразнобой, чтобы ответы не шли пачкой */
+            xSemaphoreTake(s_lock, portMAX_DELAY);
             gen = s_gen;
-            last = xTaskGetTickCount();
+            n = 0;
+            addr[n] = s_gw;
+            period[n] = 1000000 / (s_hz ? s_hz : 1);
+            due[n] = now;
+            n++;
+            for (size_t i = 0; i < s_tgt_n; i++) {
+                if (!s_tgt[i]) continue;
+                addr[n] = s_tgt[i];
+                period[n] = 1000000 / s_tgt_hz;
+                due[n] = now + (int64_t)(period[n] * (int64_t)i / (int64_t)(s_tgt_n ? s_tgt_n : 1));
+                n++;
+            }
+            xSemaphoreGive(s_lock);
         }
-        struct icmp_echo_hdr *h = (struct icmp_echo_hdr *)pkt;
-        memset(pkt, 0, sizeof(pkt));
-        h->type = ICMP_ECHO;
-        h->id = 0x5753; /* "WS" */
-        h->seqno = lwip_htons(++seq);
-        for (int i = 0; i < PAYLOAD; i++) pkt[sizeof(*h) + i] = (uint8_t)i;
-        h->chksum = inet_chksum(pkt, sizeof(pkt));
-        struct sockaddr_in to = {.sin_family = AF_INET, .sin_addr.s_addr = s_gw};
-        sendto(sock, pkt, sizeof(pkt), 0, (struct sockaddr *)&to, sizeof(to)); /* очередь полна — уйдёт следующий */
+        int64_t next = now + 100000;
+        for (size_t i = 0; i < n; i++) {
+            if (due[i] <= now) {
+                send_echo(sock, addr[i], ++seq);
+                due[i] += period[i];
+                if (due[i] < now) due[i] = now + period[i]; /* отстали (очередь Wi-Fi была занята): без залпа */
+            }
+            if (due[i] < next) next = due[i];
+        }
         while (recv(sock, rx, sizeof(rx), MSG_DONTWAIT) > 0) { /* ответы нужны радио (CSI), не программе */
         }
-        uint16_t hz = s_hz ? s_hz : 1;
-        TickType_t period = pdMS_TO_TICKS(1000 / hz);
-        vTaskDelayUntil(&last, period ? period : 1);
+        int64_t wait_us = next - esp_timer_get_time();
+        TickType_t ticks = wait_us > 0 ? pdMS_TO_TICKS((uint32_t)(wait_us / 1000)) : 0;
+        vTaskDelay(ticks ? ticks : 1);
     }
+}
+
+static esp_err_t ensure_lock(void)
+{
+    if (!s_lock) s_lock = xSemaphoreCreateMutex(); /* первый вызов — из обработчика событий Wi-Fi, до uplink */
+    return s_lock ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 esp_err_t ping_gen_start(esp_ip4_addr_t gw, uint16_t hz)
 {
-    if (!s_lock) s_lock = xSemaphoreCreateMutex(); /* первый вызов — из обработчика событий Wi-Fi, до uplink */
-    if (!s_lock) return ESP_ERR_NO_MEM;
+    if (ensure_lock() != ESP_OK) return ESP_ERR_NO_MEM;
     if (hz < 1) hz = 1;
     if (hz > 200) hz = 200;
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -90,7 +131,7 @@ esp_err_t ping_gen_start(esp_ip4_addr_t gw, uint16_t hz)
     }
     if (s_task) xTaskNotifyGive(s_task);
     xSemaphoreGive(s_lock);
-    if (err == ESP_OK) ESP_LOGI(TAG, "pinging " IPSTR " at %u Hz", IP2STR(&gw), hz);
+    if (err == ESP_OK) ESP_LOGI(TAG, "pinging " IPSTR " at %u Hz, %u devices", IP2STR(&gw), hz, (unsigned)s_tgt_n);
     return err;
 }
 
@@ -108,4 +149,21 @@ void ping_gen_set_hz(uint16_t hz)
         s_gen++; /* отсчёт периода заново */
         ESP_LOGI(TAG, "rate %u Hz", hz);
     }
+}
+
+void ping_gen_set_targets(const uint32_t *ips, size_t n, uint16_t hz)
+{
+    if (ensure_lock() != ESP_OK) return;
+    if (n > PING_GEN_MAX_TARGETS) n = PING_GEN_MAX_TARGETS;
+    if (hz < 1) hz = 1;
+    if (hz > 50) hz = 50;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++)
+        if (ips[i]) s_tgt[k++] = ips[i];
+    s_tgt_n = k;
+    s_tgt_hz = hz;
+    s_gen++;
+    xSemaphoreGive(s_lock);
+    ESP_LOGI(TAG, "%u devices at %u Hz each", (unsigned)k, hz);
 }

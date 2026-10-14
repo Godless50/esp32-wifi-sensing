@@ -199,20 +199,79 @@ int wsn_encode_log(wsn_ctx_t *ctx, const char *text, uint8_t *out, size_t cap)
 
 static uint32_t get_u32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 
-int wsn_parse_model_chunk(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_model_chunk_t *out)
+int wsn_encode_survey(wsn_ctx_t *ctx, const wsn_survey_t *s, uint8_t *out, size_t cap)
 {
-    if (!ctx || !ctx->hmac || !buf || !out) return -1;
-    if (len < WSN_HEADER_LEN + WSN_MODEL_CHUNK_HDR + WSN_HMAC_LEN) return -2;
+    if (!ctx || !ctx->hmac || !s || !out) return -1;
+    if (s->n > WSN_SURVEY_MAX) return -5;
+    if (cap < WSN_HEADER_LEN + WSN_SURVEY_HDR_LEN + (size_t)WSN_SURVEY_ENTRY_LEN * s->n + WSN_HMAC_LEN) return -4;
+    uint8_t *p = put_header(ctx, out, WSN_TYPE_SURVEY, s->n);
+    p = put_u8(p, s->state);
+    p = put_u8(p, s->progress);
+    p = put_u8(p, s->responders);
+    for (int i = 0; i < s->n; i++) {
+        const wsn_survey_entry_t *e = &s->e[i];
+        memcpy(p, e->ip, 4);
+        memcpy(p + 4, e->mac, 6);
+        p += 10;
+        p = put_u8(p, e->yield);
+        p = put_u8(p, (uint8_t)e->rssi);
+        p = put_u8(p, e->ht);
+        p = put_u8(p, e->flags);
+    }
+    return finish(ctx, out, p);
+}
+
+/* Signature, magic, type, n = 1, addressee and boot of a hub -> board packet. Returns body length or < 0. */
+static int verify_down(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint8_t type, size_t min_body,
+                       uint32_t boot_id, uint32_t *seq)
+{
+    if (!ctx || !ctx->hmac || !buf || !seq) return -1;
+    if (len < WSN_HEADER_LEN + min_body + WSN_HMAC_LEN) return -2;
     size_t body = len - WSN_HMAC_LEN;
     uint8_t mac[32];
     ctx->hmac(ctx->key, ctx->key_len, buf, body, mac);
     uint8_t diff = 0;  /* сравнение без раннего выхода */
     for (int i = 0; i < WSN_HMAC_LEN; i++) diff |= (uint8_t)(mac[i] ^ buf[body + i]);
     if (diff) return -3;
-    if (memcmp(buf, "WSN1", 4) != 0 || buf[4] != 1 || buf[5] != WSN_TYPE_MODEL_CHUNK || buf[20] != 1) return -4;
+    if (memcmp(buf, "WSN1", 4) != 0 || buf[4] != 1 || buf[5] != type || buf[20] != 1) return -4;
     if (memcmp(buf + 6, ctx->device_id, 6) != 0) return -5;
-    if (get_u32(buf + 12) != ctx->boot_id) return -6;
+    if (get_u32(buf + 12) != boot_id) return -6;
     *seq = get_u32(buf + 16);
+    return (int)body;
+}
+
+int wsn_parse_hub(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_hub_t *out)
+{
+    if (!out) return -1;
+    int body = verify_down(ctx, buf, len, WSN_TYPE_HUB, WSN_HUB_LEN, 0, seq);
+    if (body < 0) return body;
+    if ((size_t)body != WSN_HEADER_LEN + WSN_HUB_LEN) return -7;
+    const uint8_t *p = buf + WSN_HEADER_LEN;
+    memcpy(out->ip, p, 4);
+    out->port = (uint16_t)(p[4] | p[5] << 8);
+    if (out->port == 0 || out->ip[0] == 0 || out->ip[0] >= 224) return -8;  /* not a unicast host address */
+    return 0;
+}
+
+int wsn_parse_cmd(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_cmd_t *out)
+{
+    if (!out) return -1;
+    int body = verify_down(ctx, buf, len, WSN_TYPE_CMD, 2, ctx ? ctx->boot_id : 0, seq);
+    if (body < 0) return body;
+    const uint8_t *p = buf + WSN_HEADER_LEN;
+    out->cmd = p[0];
+    out->len = p[1];
+    out->args = p + 2;
+    if (out->len > WSN_CMD_MAX || (size_t)body != WSN_HEADER_LEN + 2u + out->len) return -7;
+    return 0;
+}
+
+int wsn_parse_model_chunk(const wsn_ctx_t *ctx, const uint8_t *buf, size_t len, uint32_t *seq, wsn_model_chunk_t *out)
+{
+    if (!out) return -1;
+    int r = verify_down(ctx, buf, len, WSN_TYPE_MODEL_CHUNK, WSN_MODEL_CHUNK_HDR, ctx ? ctx->boot_id : 0, seq);
+    if (r < 0) return r;
+    size_t body = (size_t)r;
     const uint8_t *p = buf + WSN_HEADER_LEN;
     out->version = get_u32(p);
     out->total = get_u32(p + 4);

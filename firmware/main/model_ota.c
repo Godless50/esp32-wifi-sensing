@@ -144,6 +144,7 @@ static void ota_task(void *arg)
             st.n_links = n;
             memset(st.links, 0, sizeof(st.links));
             memcpy(st.links, cfg_buf + 5, 6u * n);
+            memset(st.link_ip, 0, sizeof(st.link_ip));  /* линии с сервера: их пингует сервер, не плата */
             if (total >= 7u + 6u * n) {
                 st.promisc = cfg_buf[5 + 6 * n] ? 1 : 0;
                 st.beacon_hz = cfg_buf[6 + 6 * n];

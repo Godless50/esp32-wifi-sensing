@@ -80,5 +80,16 @@ int main(void)
     n = wsn_encode_log(&c, "romif +0x128 3fc9a000->00000000", out, sizeof(out));
     if (n < 0) return 1;
     hex(out, n);
+
+    /* seq 14: survey result — one device heard and chosen, one answering but never heard */
+    static wsn_survey_t sv = {.state = WSN_SURVEY_DONE, .progress = 100, .responders = 3, .n = 2,
+                              .e = {{.ip = {192, 168, 4, 2}, .mac = {0xd8, 0xd6, 0x68, 0xb3, 0x4c, 0x23}, .yield = 95,
+                                     .rssi = -56, .ht = 100, .flags = WSN_SURVEY_F_CHOSEN},
+                                    {.ip = {192, 168, 4, 28}, .flags = WSN_SURVEY_F_UNHEARD}}};
+    n = wsn_encode_survey(&c, &sv, out, sizeof(out));
+    if (n < 0) return 1;
+    hex(out, n);
+    sv.n = WSN_SURVEY_MAX + 1;
+    if (wsn_encode_survey(&c, &sv, out, sizeof(out)) != -5) return 1;
     return 0;
 }
