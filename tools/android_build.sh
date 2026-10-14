@@ -12,6 +12,10 @@ ROOT=$PWD
 CMD="${1:-build}"
 KEYDIR="$HOME/.config/wsn"
 mkdir -p "$ROOT/.gradle-cache"
+# образы прошивки (tools/release_fw.sh -> firmware/dist) едут внутри приложения: телефон прошивает плату по кабелю
+mkdir -p "$ROOT/android/app/src/main/assets/firmware"
+cp "$ROOT/firmware/dist/wsn-main.bin" "$ROOT/firmware/dist/wsn-lite.bin" "$ROOT/firmware/dist/manifest.json" \
+  "$ROOT/android/app/src/main/assets/firmware/"
 docker image inspect wsn-android-build >/dev/null 2>&1 \
   || docker build -t wsn-android-build -f "$ROOT/deploy/Dockerfile.android" "$ROOT/deploy"
 run() {

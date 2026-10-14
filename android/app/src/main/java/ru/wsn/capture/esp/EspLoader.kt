@@ -221,10 +221,11 @@ class EspLoader(private val port: SerialPort) {
 
     fun finishFlash(reboot: Boolean) { command(FLASH_END, le32(if (reboot) 0 else 1)) }
 
-    /** Octal-PSRAM N16R8 modules get the full image; 8 MB no-PSRAM the lite one. Requires >= 8 MB flash. */
+    /** "main" (16 MB layout, octal PSRAM) needs both; anything else with >= 8 MB flash gets "lite" (8 MB layout,
+     *  runs without PSRAM — an N8R8 module too). Less than 8 MB flash: not supported. */
     fun chooseImage(info: ChipInfo): String {
         if (info.flashMb < 8) throw EspError("flash ${info.flashMb} MB: at least 8 MB required")
-        return if (info.psramOctal) "main" else "lite"
+        return if (info.psramOctal && info.flashMb >= 16) "main" else "lite"
     }
 
     private fun sleep(ms: Long) = try { Thread.sleep(ms) } catch (_: InterruptedException) {}

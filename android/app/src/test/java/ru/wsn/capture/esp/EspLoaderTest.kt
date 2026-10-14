@@ -133,6 +133,16 @@ class EspLoaderTest {
         assertEquals(0L, l.readReg(EspLoader.RTC_WDT_CONFIG0))
     }
 
+    @Test fun imageChoiceByFlashAndPsram() {
+        val l = EspLoader(FakeRom())
+        val base = l.chipInfo()
+        assertEquals("lite", l.chooseImage(base.copy(flashMb = 8, psramOctal = true)))   // N8R8: 8 МБ раскладка
+        assertEquals("lite", l.chooseImage(base.copy(flashMb = 16, psramOctal = false)))
+        assertEquals("main", l.chooseImage(base.copy(flashMb = 16, psramOctal = true)))
+        try { l.chooseImage(base.copy(flashMb = 4)); throw AssertionError("4 MB must be refused") }
+        catch (e: EspLoader.EspError) {}
+    }
+
     @Test fun choosesMainImageForN16R8() {
         val l = EspLoader(FakeRom())
         assertEquals("main", l.chooseImage(l.chipInfo()))
