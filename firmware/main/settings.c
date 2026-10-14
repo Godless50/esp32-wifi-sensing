@@ -19,7 +19,7 @@ esp_err_t settings_load(wsn_settings_t *out)
     out->port = 5005;
     out->ping_hz = 100;
     out->csi_source = 0;
-    out->promisc = 1;     /* как было: прослушивание включено, пока сервер не скажет иначе */
+    out->promisc = 0;     /* прослушивание эфира роняет библиотеку Wi-Fi (13.10); линии между платами — через ESP-NOW */
     out->beacon_hz = 50;
     nvs_handle_t h;
     esp_err_t err = nvs_open(NS, NVS_READONLY, &h);

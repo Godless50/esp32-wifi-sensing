@@ -9,6 +9,7 @@
 
 #include <string.h>
 
+#include "csi_capture.h"
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_wifi.h"
@@ -34,6 +35,12 @@ static void beacon_task(void *arg)
     }
 }
 
+/* Маяк другой платы ("WSNB" + счётчик): её линию "та плата -> я" берём в захват CSI (до WSN_MAX_LINKS). */
+static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
+{
+    if (info && data && len == 8 && memcmp(data, "WSNB", 4) == 0) csi_capture_add_link(info->src_addr);
+}
+
 esp_err_t espnow_beacon_start(uint16_t hz)
 {
     if (s_task || hz == 0) return ESP_OK;
@@ -47,6 +54,7 @@ esp_err_t espnow_beacon_start(uint16_t hz)
     peer.encrypt = false;
     err = esp_now_add_peer(&peer);
     if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) return err;
+    esp_now_register_recv_cb(on_recv);  /* соседние платы находятся сами: настраивать линии вручную не нужно */
     esp_now_rate_config_t rc = {.phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI};
     if (esp_now_set_peer_rate_config(BCAST, &rc) != ESP_OK) ESP_LOGW(TAG, "HT rate not set (legacy frames)");
     if (xTaskCreatePinnedToCore(beacon_task, "espnow_beacon", 2048, NULL, 4, &s_task, 0) != pdPASS) return ESP_ERR_NO_MEM;

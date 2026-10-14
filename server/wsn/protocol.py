@@ -177,11 +177,13 @@ def peek_device_id(buf: bytes) -> str:
     return _mac_str(buf[6:12])
 
 
-def parse_packet(buf: bytes, key: bytes) -> Packet:
+def parse_packet(buf: bytes, key: bytes | None, verify: bool = True) -> Packet:
+    """verify=False: no signature check — only for recordings of datagrams that were checked when they arrived
+    (the board's key changes when it is provisioned again, old recordings stay readable)."""
     if len(buf) < HEADER_LEN + HMAC_LEN:
         raise ProtocolError("length: too short")
     body, tag = buf[:-HMAC_LEN], buf[-HMAC_LEN:]
-    if not hmac.compare_digest(_sign(key, body), tag):
+    if verify and (key is None or not hmac.compare_digest(_sign(key, body), tag)):
         raise ProtocolError("hmac mismatch")
     magic, ver, ptype, dev, boot_id, seq, n = _HEADER.unpack_from(body, 0)
     if magic != MAGIC:

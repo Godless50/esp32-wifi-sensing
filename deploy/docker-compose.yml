@@ -12,7 +12,7 @@ services:
       WSN_HTTP_PORT: "8080"
       WSN_DATA: /data
       WSN_UI: /ui
-      TZ: Europe/Moscow
+      TZ: "${WSN_TZ:-UTC}"  # install.sh пишет WSN_UID / WSN_GID / WSN_TZ в deploy/.env
       WSN_SOUND_HZ: "${WSN_SOUND_HZ:-100}"  # зонды сервера -> платы (0 — выключить)
     volumes:
       - ../data:/data
@@ -24,7 +24,7 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    env_file: ../data/caddy.env   # WSN_HOST, WSN_UI_HASH — создаёт tools/ui_password.sh
+    env_file: ../data/caddy.env   # WSN_HOST, WSN_UI_HASH — создаёт install.sh (пароль — только хешем)
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

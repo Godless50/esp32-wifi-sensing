@@ -31,6 +31,34 @@ def _last(events: list[dict], kind: str) -> dict | None:
     return None
 
 
+def device_marks(events: list[dict]) -> dict[str, dict]:
+    """Phone marks next to boards / access points: mac -> its last mark, in the order the devices were first marked."""
+    out: dict[str, dict] = {}
+    for e in events:
+        if e.get("kind") == "device" and e.get("p") is not None and e.get("role") in ("board", "ap") and e.get("mac"):
+            out[str(e["mac"]).lower()] = e  # повторная отметка заменяет прежнюю; порядок словаря — по первой
+    return out
+
+
+def frame_marks(events: list[dict]) -> tuple[dict | None, dict | None]:
+    """Marks that fix the plan axes: the origin is the "origin" mark or the first marked board; the x axis points to
+    the "router" mark, else to the first marked access point (or the next board) far enough from the origin."""
+    origin, router = _last(events, "origin"), _last(events, "router")
+    marks = list(device_marks(events).values())
+    boards = [e for e in marks if e.get("role") == "board"]
+    if origin is None and boards:
+        origin = boards[0]
+    if router is None and origin is not None:
+        cands = [e for e in marks if e.get("role") == "ap"] + [b for b in boards if b is not origin]
+        for c in cands:  # плата может стоять у самого роутера: берём первую отметку, от которой строится ось
+            try:
+                frame_from_points(origin["p"], c["p"])
+            except (GeometryError, TypeError, ValueError, IndexError):
+                continue
+            return origin, c
+    return origin, router
+
+
 def overrides_path(store: Store) -> Path:
     return store.sessions_dir.parent / "plan_overrides.json"
 
@@ -42,12 +70,14 @@ def build_plan(store: Store) -> dict:
     skipped: dict[str, str] = {}
     warnings: dict[str, str] = {}
     router_xy = None
+    walk_boards: dict[str, dict] = {}
+    walk_aps: dict[str, dict] = {}
     walks = []
     for s in store.list_sessions():
         if s.stopped is None or s.kind != "walk":
             continue
         events = _read_jsonl(store.session_dir(s.id) / "events.jsonl")
-        walks.append((s, events, _last(events, "origin"), _last(events, "router")))
+        walks.append((s, events, *frame_marks(events)))
     # обходы с полной системой координат совместимы между собой; без роутера — только если других нет
     have_full = any(o is not None and r is not None for _, _, o, r in walks)
     for s, events, origin, router in walks:
@@ -72,8 +102,15 @@ def build_plan(store: Store) -> dict:
             continue
         if warn:
             warnings[s.id] = warn
-        else:
+        elif router.get("role") != "board":  # ось на вторую плату: роутера на плане нет
             router_xy = [round(v, 3) for v in frame.apply(router["p"])]
+        for mac, e in device_marks(events).items():  # места плат и точек доступа (поздний обход заменяет ранний)
+            xy = [round(v, 3) for v in frame.apply(e["p"])]
+            if e["role"] == "board":
+                walk_boards[mac] = {"device_id": mac, "xy": xy, "z": 0.8, "note": "отмечена в обходе " + s.id}
+            else:
+                walk_aps[mac] = {"type": "точка доступа", "xy": xy, "size": [0.3, 0.3, 0.1], "rot": 0.0, "z": 1.0,
+                                 "mac": mac, "session": s.id}
         current: tuple[str, list] | None = None
 
         def finish(room) -> None:
@@ -134,6 +171,11 @@ def build_plan(store: Store) -> dict:
                             "session": "edited"} for o in ov["objects"]]
         except (ValueError, TypeError, AttributeError):
             warnings["overrides"] = "plan_overrides.json is malformed; ignored"
+    # платы и точки доступа, отмеченные телефоном в обходе (ручные правки тех же устройств важнее)
+    have = {b["device_id"] for b in boards}
+    boards += [b for mac, b in walk_boards.items() if mac not in have]
+    have = {str(o.get("mac") or "").lower() for o in objects}
+    objects += [o for mac, o in walk_aps.items() if mac not in have]
     return {
         "rooms": [{"name": n, "polygon": poly, "edited": n in edited} for n, poly in rooms.items()],
         "zones": zones,
@@ -157,11 +199,19 @@ class RoomTracker:
         self.origin = None
         self.router = None
         self.corners: list | None = None
+        self.marks: list[dict] = []
 
     def check(self, kind: str, rec: dict) -> tuple[str, str] | None:
         # плата и роутер — в любом порядке: систему координат считаем после записи
         if kind == "session_start":
             self.reset()
+        elif kind == "device":
+            if rec.get("p") is None or rec.get("role") not in ("board", "ap") or not rec.get("mac"):
+                return ("bad_device", "a mark needs p, mac and role board|ap")
+            self.marks.append({**rec, "kind": "device"})
+            o, r = frame_marks(self.marks)  # те же оси, что потом у плана: живая точка телефона на карте
+            self.origin = o["p"] if o else None
+            self.router = r["p"] if r else None
         elif kind in ("origin", "router") and rec.get("p") is not None:
             other = self.router if kind == "origin" else self.origin
             if other is not None:
@@ -170,6 +220,7 @@ class RoomTracker:
                     code = "bad_router" if kind == "router" else "bad_origin"
                     return (code, f"board and router are {dist:.2f} m apart; mark each one standing next to it")
             setattr(self, kind, rec["p"])
+            self.marks.append({**rec, "kind": kind})
         elif kind == "room_new":
             self.corners = []
         elif kind == "corner":

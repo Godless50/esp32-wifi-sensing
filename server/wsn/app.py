@@ -114,12 +114,32 @@ def create_app(
     pinger=None,
     pusher=None,
     sounder=None,
+    infer=None,
 ) -> FastAPI:
     ui_dir = Path(ui_dir)
     tracker = RoomTracker()
     person = PersonTracker(  # человек на плане: слушает pred / motion / breath хаба; состояние — между перезапусками
         publish=hub.publish, state_path=(store.sessions_dir.parent / "run" / "person_state.json") if store else None)
     hub.listeners.append(person.on_message)
+    if infer is not None:  # модель квартиры (wsn.zonemodel): каждый кадр CSI -> её окна
+        hub.frame_listeners.append(infer.on_frame)
+
+    def board_list() -> list[dict]:
+        """Boards on the air (provisioning order) and the access point each one is connected to."""
+        known = ingest.keys.ids() if hasattr(ingest.keys, "ids") else []
+        live = {d.device_id: d for d in hub.devices() if d.age_s <= 30}
+        order = [d for d in known if d in live] + sorted(d for d in live if d not in known)
+        out, aps = [], {}
+        for i, dev in enumerate(order, 1):
+            links = live[dev].links
+            ap = max((s for s in links if s not in live and s not in known), key=lambda s: links[s]["hz"], default=None)
+            out.append({"mac": dev, "role": "board", "name": f"Плата {i} ({dev[-5:]})", "ap": ap,
+                        "links": len(links), "csi_hz": round(live[dev].csi_hz, 1)})
+            if ap:
+                aps.setdefault(ap, []).append(dev)
+        for j, (ap, boards) in enumerate(aps.items(), 1):
+            out.append({"mac": ap, "role": "ap", "name": f"Точка доступа {j} ({ap[-5:]})", "boards": boards})
+        return out
     # Пароль Wi-Fi для новой платы: только в памяти процесса, 10 минут, отдаётся один раз скрипту на хосте
     # (tools/provision_web.sh) по токену из data/run/provision.token. На диск не пишется.
     prov = {"pw": None, "until": 0.0, "result": None}
@@ -147,19 +167,28 @@ def create_app(
         hub.publish({"type": "phone", "t": now, "xy": [round(x, 3), round(y, 3)]})
 
     capture = (
-        CaptureProtocol(store, recorder, default_device or (lambda: None), validate_event=tracker.check)
+        CaptureProtocol(store, recorder, default_device or (lambda: None), validate_event=tracker.check,
+                        devices=board_list)
         if store is not None and recorder is not None
         else None
     )
 
+    plan_cache: dict = {"plan": None, "dirty": False}
+
     async def plan_refresher() -> None:
         while True:
             try:
-                if person.set_plan(await asyncio.to_thread(build_plan, store)):
+                plan_cache["dirty"] = False
+                plan = await asyncio.to_thread(build_plan, store)
+                plan_cache["plan"] = plan
+                if person.set_plan(plan):
                     log.info("person tracker: plan updated, %s", person.snapshot()["grid"])
             except Exception:
                 log.exception("plan refresh failed")
-            await asyncio.sleep(PLAN_REFRESH_S)
+            for _ in range(int(PLAN_REFRESH_S)):  # запись обхода сохранена — план сразу, не через минуту
+                if plan_cache["dirty"]:
+                    break
+                await asyncio.sleep(1.0)
 
     async def ticker() -> None:
         while True:
@@ -168,6 +197,15 @@ def create_app(
                 recorder.tick(time.monotonic())
             except Exception:
                 log.exception("recorder tick failed")
+
+    async def infer_loop() -> None:
+        from .zonemodel import STEP_S
+        while True:
+            await asyncio.sleep(STEP_S)
+            try:
+                infer.tick(time.monotonic())
+            except Exception:
+                log.exception("room model tick failed")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -188,6 +226,8 @@ def create_app(
             tasks.append(asyncio.create_task(pinger.run()))
         if store is not None:
             tasks.append(asyncio.create_task(plan_refresher()))
+        if infer is not None:
+            tasks.append(asyncio.create_task(infer_loop()))
         try:
             yield
         finally:
@@ -370,13 +410,53 @@ def create_app(
         """Last tracked position of the person, grid size and per-link noise floors (for debugging)."""
         return person.snapshot()
 
+    def train_status() -> dict | None:
+        if store is None:
+            return None
+        p = store.sessions_dir.parent / "run" / "train_status.json"
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    @app.get("/api/model")
+    def api_model() -> dict:
+        """The flat's room model (data/model) and the state of the last training (train.sh)."""
+        return {"model": infer.status() if infer is not None else None, "training": train_status()}
+
+    @app.get("/api/status")
+    def api_status() -> dict:
+        """Everything the phone app shows on its home screen: boards, plan, recordings, model."""
+        devs = board_list()
+        plan = plan_cache["plan"] or (build_plan(store) if store is not None else None)
+        sessions = _store().list_sessions() if store is not None else []
+        walks = [s for s in sessions if s.kind == "walk" and s.stopped is not None]
+        active = store.active() if store is not None else None
+        return {
+            "boards": [d for d in devs if d["role"] == "board"],
+            "aps": [d for d in devs if d["role"] == "ap"],
+            "plan": None if plan is None else {
+                "rooms": [r["name"] for r in plan["rooms"]],
+                "boards": [b["device_id"] for b in plan["boards"]],
+                "skipped": plan["skipped"], "warnings": plan["warnings"]},
+            "walks": [{"id": s.id, "started_wall": s.started_wall, "duration_s": round(s.stopped - s.started, 1),
+                       "poses": s.poses, "events": s.events, "plan_ok": s.plan_ok} for s in walks[-5:]],
+            "recording": dataclasses.asdict(active) if active else None,
+            "model": infer.status() if infer is not None else None,
+            "training": train_status(),
+            "person": person.last,
+        }
+
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket) -> None:
         sub = hub.subscribe()  # до accept: клиент не пропустит первые сообщения
+        # ?types=person,rooms — только эти сообщения (телефону не нужен поток амплитуд по 20 Гц на плату)
+        types = {t for t in (ws.query_params.get("types") or "").split(",") if t}
         try:
             await ws.accept()
             async for msg in sub:
-                await ws.send_json(msg)
+                if not types or msg.get("type") in types:
+                    await ws.send_json(msg)
         except WebSocketDisconnect:
             pass
         finally:
@@ -402,6 +482,8 @@ def create_app(
                     replies = capture.on_message(cid, msg)
                     for reply in replies:
                         await ws.send_json(reply)
+                    if msg.get("type") == "event" and msg.get("kind") in ("session_stop", "device", "room_close"):
+                        plan_cache["dirty"] = True
                     if msg.get("type") == "poses" and not any(r.get("type") == "error" for r in replies):
                         publish_phone(msg)
                 if time.monotonic() - last_state >= 1.0:

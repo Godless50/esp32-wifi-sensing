@@ -2,6 +2,6 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY server/pyproject.toml /app/pyproject.toml
 COPY server/wsn /app/wsn
-RUN pip install --no-cache-dir -e ".[test]"
+RUN pip install --no-cache-dir -e ".[test,tools]"
 ENV PYTHONUNBUFFERED=1
 CMD ["python", "-m", "wsn"]

@@ -75,3 +75,15 @@ def test_wait_status_retries_while_board_boots():
 
 def test_parse_status_ignores_other_lines():
     assert parse_status("I (123) wifi: connected") is None
+
+
+def test_scan_picks_the_strongest_node_of_the_network():
+    from wsn.provision import best_bssid, networks, parse_scan
+    lines = ["scan", "AP 02:00:00:00:a1:18 ch=6 rssi=-71 ssid=Home",
+             "AP 02:00:00:00:a1:2c ch=6 rssi=-48 ssid=Home", "AP 11:22:33:44:55:66 ch=1 rssi=-60 ssid=Neighbour",
+             "AP 11:22:33:44:55:77 ch=1 rssi=-80 ssid=", "AP_END n=4", "AP 99:99:99:99:99:99 ch=1 rssi=-1 ssid=Late"]
+    aps = parse_scan(lines)
+    assert len(aps) == 4 and aps[0]["bssid"] == "02:00:00:00:a1:18"
+    assert best_bssid(aps, "Home") == "02:00:00:00:a1:2c"
+    assert best_bssid(aps, "Nope") is None
+    assert networks(aps) == [("Home", -48), ("Neighbour", -60)]

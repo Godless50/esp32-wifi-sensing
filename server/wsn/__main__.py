@@ -16,6 +16,7 @@ from .model_push import ModelPusher
 from .recorder import Recorder
 from .sounder import Sounder
 from .store import Store
+from .zonemodel import LiveInfer
 
 
 def main() -> None:
@@ -52,8 +53,10 @@ def main() -> None:
     pinger = Pinger(PingerConfig.load(data / "links.json"))
     sound_hz = float(os.environ.get("WSN_SOUND_HZ", "100"))  # 0 — не зондировать
     sounder = Sounder(ingest, pusher, hz=sound_hz, last_seen=hub.last_seen) if sound_hz > 0 else None
+    # модель квартиры (train.sh -> data/model): сервер подхватывает новую сам, без перезапуска
+    infer = LiveInfer(data / "model", hub.publish, state_path=data / "run" / "link_floors.json")
     app = create_app(hub, ingest, ui, udp_port=udp_port, store=store, recorder=recorder,
-                     default_device=default_device, pinger=pinger, pusher=pusher, sounder=sounder)
+                     default_device=default_device, pinger=pinger, pusher=pusher, sounder=sounder, infer=infer)
     uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
 
 

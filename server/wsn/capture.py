@@ -19,6 +19,8 @@ from .timesync import ClockSync
 
 EVENT_KINDS = {
     "session_start", "session_stop", "origin", "router", "room_new", "corner", "room_close", "object", "label",
+    "device",  # телефон у платы или точки доступа: {mac, role: board|ap, p}
+    "step",    # шаг сценария записи в приложении: {name, room?, activity, duration_s}
 }
 
 
@@ -41,10 +43,12 @@ class CaptureProtocol:
         default_device: Callable[[], str | None],
         clock: Callable[[], float] = time.monotonic,
         validate_event: Callable[[str, dict], tuple[str, str] | None] | None = None,
+        devices: Callable[[], list[dict]] | None = None,
     ):
         self.store = store
         self.recorder = recorder
         self.default_device = default_device
+        self.devices = devices  # платы и их точки доступа в эфире: что телефону отмечать на плане
         self.now = clock
         self.validate_event = validate_event  # returns (code, message) to reject the event, else None
         self.clients: dict[str, _Client] = {}
@@ -61,6 +65,7 @@ class CaptureProtocol:
             "owner": s is not None and self.owner == cid,
             "device_id": self.default_device(),
             "clock_synced": self.client(cid).clock.offset is not None,
+            "devices": self.devices() if self.devices is not None else [],
         }
 
     def _ack(self, c: _Client) -> dict:

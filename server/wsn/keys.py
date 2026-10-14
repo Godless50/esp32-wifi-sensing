@@ -37,6 +37,12 @@ class KeyStore:
             self.errors += 1
             log.error("key file %s unreadable; keeping %d previously loaded keys", self.path, len(self._keys))
 
+    def ids(self) -> list[str]:
+        """Known boards in the order they were provisioned."""
+        with self._lock:
+            self._reload()
+            return list(self._keys)
+
     def get(self, device_id: str) -> bytes | None:
         with self._lock:
             self._reload()

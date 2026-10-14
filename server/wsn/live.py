@@ -86,6 +86,68 @@ def board_prediction(device_id: str, t: float, r: Prediction) -> dict:
             "model": f"плата v{r.model_ver}", "infer_ms": r.infer_ms, "links_live": r.links_live}
 
 
+class FrameFeed:
+    """CSI frames of a packet -> (src, capture time on the server clock, field, amplitude, field changed).
+
+    Shared by the live view and by training (wsn.train), so both place and pick frames the same way:
+      * board clock -> server clock: min over CLOCK_WINDOW_S of (arrival - frame time). A packet that waited (the
+        Wi-Fi network stalled and the board sent its backlog in a burst) arrives late, so the minimum ignores it;
+        frames are placed at the time they were captured, not when they arrived;
+      * HT-LTF per link; L-LTF only for a transmitter that sent no HT frame for LEGACY_AFTER_S (11a/g devices).
+    """
+
+    def __init__(self):
+        self._clock: dict[str, deque] = {}       # очередь минимумов (приход, приход - время кадра) по плате
+        self._clock_boot: dict[str, int] = {}
+        self._kind: dict[tuple[str, str], str] = {}
+        self._last_ht: dict[tuple[str, str], float] = {}
+
+    def offset(self, p: Packet, recv_t: float) -> float | None:
+        """Server time of board clock 0 for this boot (None: frames carry no board clock)."""
+        last_us = p.frames[-1].t_us
+        if last_us <= 0:  # нет часов платы (старые записи, тесты)
+            return None
+        q = self._clock.get(p.device_id)
+        if q is None or self._clock_boot.get(p.device_id) != p.boot_id:
+            q = self._clock[p.device_id] = deque()
+            self._clock_boot[p.device_id] = p.boot_id
+        o = recv_t - last_us / 1e6
+        while q and q[-1][1] >= o:  # очередь минимумов: значения возрастают от начала к концу
+            q.pop()
+        q.append((recv_t, o))
+        while q[0][0] < recv_t - CLOCK_WINDOW_S:
+            q.popleft()
+        return q[0][1]
+
+    def frames(self, p: Packet, recv_t: float) -> list[tuple[str, float, str, np.ndarray, bool]]:
+        if not p.frames:
+            return []
+        off = self.offset(p, recv_t)
+        last_us = p.frames[-1].t_us
+        out = []
+        for f in p.frames:
+            key = (p.device_id, f.src)
+            if len(f.data) >= 256:
+                kind = "ht"
+                self._last_ht[key] = recv_t
+            elif recv_t - self._last_ht.get(key, -1e9) > LEGACY_AFTER_S:
+                kind = "lltf"  # передатчик шлёт только кадры 11a/g: берём L-LTF
+            else:
+                continue  # у линии есть HT-кадры: редкие L-LTF не подмешиваем
+            changed = self._kind.get(key, "ht") != kind
+            self._kind[key] = kind
+            amp = ltf_amplitude(f.data, kind)
+            if amp is None:
+                continue
+            if off is not None:  # время захвата кадра на часах сервера
+                ft = min(recv_t, f.t_us / 1e6 + off)
+            else:
+                lag = (last_us - f.t_us) / 1e6  # время самого кадра по часам платы (внутри пакета)
+                ft = recv_t - lag if 0.0 <= lag < 2.0 else recv_t
+            out.append((f.src, ft, kind, amp, changed))
+        return out
+
+
 class _Motion:
     def __init__(self):
         self.window: deque = deque()  # (t, amp[64])
@@ -163,11 +225,11 @@ class LiveHub:
         self._last_emit: dict[str, float] = {}
         self._subs: set[Subscription] = set()
         self._motion: dict[tuple[str, str], _Motion] = {}
-        self._clock: dict[str, deque] = {}       # очередь минимумов (приход, приход - время кадра) по плате
-        self._clock_boot: dict[str, int] = {}
+        self.feed = FrameFeed()
         self._link_times: dict[str, dict[str, deque]] = {}
         self._link_rssi: dict[str, dict[str, int]] = {}
         self.listeners: list = []  # вызываются с каждым сообщением хаба (трекер человека)
+        self.frame_listeners: list = []  # fn(device_id, src, t кадра, amp) на каждый принятый кадр (модель квартиры)
 
     def subscribe(self) -> Subscription:
         sub = Subscription(self)
@@ -253,63 +315,31 @@ class LiveHub:
         self._broadcast({"type": "amp", "device_id": p.device_id, "src": last.src, "t": recv_t, "rssi": last.rssi,
                          "sig_mode": last.sig_mode, "amp": [round(float(x), 1) for x in amp]})
 
-    def _board_offset(self, p: Packet, recv_t: float) -> float | None:
-        """Server time of board clock 0 for this boot: min over CLOCK_WINDOW_S of (arrival - frame time).
-
-        A packet that waited (the Wi-Fi network stalled and the board sent its backlog in a burst) arrives late,
-        so the minimum ignores it; frames are then placed at the time they were captured, not when they arrived.
-        Without this the 1 s motion window after every stall held several seconds of frames -> false motion.
-        """
-        last_us = p.frames[-1].t_us
-        if last_us <= 0:  # нет часов платы (старые записи, тесты)
-            return None
-        q = self._clock.get(p.device_id)
-        if q is None or self._clock_boot.get(p.device_id) != p.boot_id:
-            q = self._clock[p.device_id] = deque()
-            self._clock_boot[p.device_id] = p.boot_id
-        o = recv_t - last_us / 1e6
-        while q and q[-1][1] >= o:  # очередь минимумов: значения возрастают от начала к концу
-            q.pop()
-        q.append((recv_t, o))
-        while q[0][0] < recv_t - CLOCK_WINDOW_S:
-            q.popleft()
-        return q[0][1]
-
     def _motion_update(self, p: Packet, recv_t: float, primary: str) -> None:
-        off = self._board_offset(p, recv_t)
+        by_src: dict[str, list] = {}
+        for src, ft, kind, amp, _ in self.feed.frames(p, recv_t):
+            by_src.setdefault(src, []).append((ft, kind, amp))
+            for fn in self.frame_listeners:
+                try:
+                    fn(p.device_id, src, ft, amp)
+                except Exception:  # слушатель не должен ронять приём пакетов
+                    log.exception("frame listener failed")
         for src in {f.src for f in p.frames}:
-            self._motion_link(p, recv_t, src, src == primary, off)
+            self._motion_link(p, recv_t, src, src == primary, by_src.get(src, []))
 
-    def _motion_link(self, p: Packet, recv_t: float, src: str, primary: bool, off: float | None = None) -> None:
+    def _motion_link(self, p: Packet, recv_t: float, src: str, primary: bool, items: list) -> None:
         m = self._motion.get((p.device_id, src))
         if m is None:
             m = self._motion[(p.device_id, src)] = _Motion()
-        last_us = p.frames[-1].t_us
-        for f in p.frames:
-            if f.src != src:
-                continue
-            if len(f.data) >= 256:
-                kind = "ht"
-                m.last_ht = recv_t
-            elif recv_t - m.last_ht > LEGACY_AFTER_S:
-                kind = "lltf"  # передатчик шлёт только кадры 11a/g: берём L-LTF
-            else:
-                continue  # у линии есть HT-кадры: редкие L-LTF не подмешиваем
-            if kind != m.kind:
+        for ft, kind, amp in items:
+            if kind != m.kind:  # HT-LTF и L-LTF в одном окне не смешиваем
                 m.kind = kind
                 m.window.clear()
                 m.baseline.clear()
                 m.long.clear()
-            amp = ltf_amplitude(f.data, kind)
-            if amp is not None:
-                if off is not None:  # время захвата кадра на часах сервера
-                    ft = min(recv_t, f.t_us / 1e6 + off)
-                else:
-                    lag = (last_us - f.t_us) / 1e6  # время самого кадра по часам платы (внутри пакета)
-                    ft = recv_t - lag if 0.0 <= lag < 2.0 else recv_t
-                m.window.append((ft, amp))
-                if not m.long or ft - m.long[-1][0] >= 1 / BREATH_HZ:
-                    m.long.append((ft, amp))
+            m.window.append((ft, amp))
+            if not m.long or ft - m.long[-1][0] >= 1 / BREATH_HZ:
+                m.long.append((ft, amp))
         t_end = m.window[-1][0] if m.window else recv_t
         while m.window and m.window[0][0] <= t_end - MOTION_WINDOW_S:
             m.window.popleft()

@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Доверяем локальному CA Caddy (вшит при сборке) и системным CA. Пользовательские CA не нужны. -->
+<!-- Только HTTPS. Сертификату сервера приложение доверяет через сопряжение (Server.kt: CA, сверенный с QR-кодом),
+     а не через этот файл: в APK нет ничьего сертификата, один APK подходит любому серверу. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
-            <certificates src="@raw/wsn_ca" />
             <certificates src="system" />
         </trust-anchors>
     </base-config>

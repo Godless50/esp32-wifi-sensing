@@ -33,6 +33,8 @@ size_t csi_capture_sources(csi_src_stat_t *out, size_t cap, bool reset);
 esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const uint8_t (*links)[6], size_t n_links,
                             bool promisc);
 void csi_capture_counters(csi_counters_t *out);
+/* Add a transmitter (another board heard over ESP-NOW) to the captured links; false if known, full or not started. */
+bool csi_capture_add_link(const uint8_t mac[6]);
 /* Pop next frame; data copied into data_buf (>= CSI_MAX_LEN), out->data points to it. */
 bool csi_capture_pop(wsn_csi_frame_t *out, int8_t *data_buf, TickType_t wait);
 /* Stop / restart CSI and the Wi-Fi sniffer around flash writes: a flash write while the sniffer copies a frame

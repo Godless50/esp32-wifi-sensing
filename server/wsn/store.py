@@ -63,10 +63,18 @@ def read_csi_bin(path: Path) -> list[tuple[float, bytes]]:
 
 
 class Store:
-    def __init__(self, db_path: Path, sessions_dir: Path):
+    def __init__(self, db_path: Path, sessions_dir: Path, readonly: bool = False):
+        """readonly: a second reader next to the running server (training) — never writes, never closes sessions."""
         self.sessions_dir = Path(sessions_dir)
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.readonly = readonly
         self._lock = threading.RLock()
+        self._active: SessionInfo | None = None
+        self._files: dict[str, object] = {}
+        self.last_activity = 0.0
+        if readonly:
+            self._db = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True, check_same_thread=False)
+            return
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(db_path), check_same_thread=False)
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, kind TEXT, device_id TEXT, started REAL,"
@@ -74,9 +82,6 @@ class Store:
             " duration_s REAL)"
         )
         self._db.commit()
-        self._active: SessionInfo | None = None
-        self._files: dict[str, object] = {}
-        self.last_activity = 0.0
         self._close_interrupted()
 
     # --- lifecycle -----------------------------------------------------
@@ -161,6 +166,8 @@ class Store:
         return self._active
 
     def set_plan_status(self, sid: str, ok: bool, reason: str) -> None:
+        if self.readonly:
+            return
         with self._lock:
             self._db.execute("UPDATE sessions SET plan_ok=?, plan_reason=? WHERE id=?", (int(ok), reason, sid))
             self._db.commit()

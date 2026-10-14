@@ -50,7 +50,14 @@ LINK_ONLY_GAIN = 2.4  # без модели: активность двух са�
 P_FLOOR = 0.05
 # Зоны: если в ответе есть counts_probs (многоголовая модель, все комнаты плана) — свидетельство «в зоне кто-то
 # двигается» по каждой комнате. Иначе (модель на 4 зоны) комнаты, которых она не знает, получают нейтральное 1/K.
-SRC_WEIGHT = {"board": 0.8, "server": 0.8}
+SRC_WEIGHT = {"board": 0.8, "server": 0.8, "model": 1.0}
+# Модель квартиры (wsn.zonemodel, обучена на обходе клиента): ответ годится, если живы MODEL_LINKS_FRAC её линий.
+# Комнаты на карте при свежем ответе — по ней: P(в комнате) x P(кто-то двигается), сглаженные MODEL_ROOM_EMA_S;
+# «пусто» дольше EMPTY_HOLD_S при P >= EMPTY_ON — в квартире никого.
+MODEL_LINKS_FRAC = 0.6
+MODEL_FRESH_S = 3.0
+MODEL_ROOM_EMA_S = 1.5
+EMPTY_ON, EMPTY_HOLD_S = 0.7, 10.0
 STILL_MODEL_W = 0.4
 SPEED_MOVING, SPEED_STILL = 1.5, 0.1  # м/с: разброс веры за секунду
 SELF_W = 0.5
@@ -295,6 +302,10 @@ class PersonTracker:
         self._board_act: dict[str, tuple[float, float]] = {}  # плата -> (t, EMA средней активности её линий)
         self._cover_at = -1e9
         self._cover: dict[str, tuple[float, float]] = {}  # зона -> (когда выбрана последний раз, сила движения)
+        self._model_t = -1e9  # последний ответ модели квартиры
+        self._model_rooms: dict[str, float] = {}  # зона -> EMA P(в зоне) x P(движется)
+        self._empty_p = 0.0
+        self._empty_since: float | None = None
         self.last: dict | None = None
 
     # ---- план ----
@@ -495,8 +506,33 @@ class PersonTracker:
         self._update_cover(now)
         return {lab: m for lab, (t, m) in self._cover.items() if now - t <= COVER_HOLD_S}
 
+    def _note_model(self, msg: dict, now: float) -> None:
+        """Answer of the flat's model: smoothed motion per zone and the "nobody home" state."""
+        dt = min(5.0, max(0.0, now - self._model_t)) if self._model_t > -1e9 else 1.0
+        a = 1.0 - math.exp(-dt / MODEL_ROOM_EMA_S)
+        empty = float(msg.get("empty_p", 0.0))
+        mv = float(msg.get("moving_p", 0.0)) * (1.0 - empty)
+        probs = msg.get("probs") or {}
+        for z in set(probs) | set(self._model_rooms):
+            v = float(probs.get(z, 0.0)) * mv
+            self._model_rooms[z] = self._model_rooms.get(z, v) + a * (v - self._model_rooms.get(z, v))
+        self._empty_p += a * (empty - self._empty_p)
+        if self._empty_p >= EMPTY_ON:
+            self._empty_since = now if self._empty_since is None else self._empty_since
+        else:
+            self._empty_since = None
+        self._model_t = now
+
+    def model_fresh(self, now: float) -> bool:
+        return now - self._model_t <= MODEL_FRESH_S
+
+    def nobody_home(self, now: float) -> bool:
+        return self.model_fresh(now) and self._empty_since is not None and now - self._empty_since >= EMPTY_HOLD_S
+
     def _local_evidence(self, b: np.ndarray, now: float, w: float) -> np.ndarray:
         g = self.grid
+        if self.model_fresh(now):  # есть модель этой квартиры: место — по ней, грубая геометрия не нужна
+            return b
         for lab in self._cover_now(now):
             b = b * np.where(g.label_idx == g.labels.index(lab), 1.0 + LOCAL_W, 1.0) ** w
         return b
@@ -510,7 +546,11 @@ class PersonTracker:
         # Ответ модели годится, только если живы её линии. Модели обучены на линиях из режима прослушивания эфира
         # (точки доступа, бытовые устройства); без него живы 1-2 из 10, и раньше такой ответ просто выбрасывался —
         # карта стояла на «ждём данных». Теперь шаг идёт по активности всех текущих линий, модель — только добавка.
-        model_ok = msg.get("links_live") is None or int(msg["links_live"]) >= MIN_LINKS_LIVE
+        total = msg.get("links_total")
+        need = MIN_LINKS_LIVE if total is None else max(1, min(MIN_LINKS_LIVE, math.ceil(MODEL_LINKS_FRAC * int(total))))
+        model_ok = msg.get("links_live") is None or int(msg["links_live"]) >= need
+        if model_ok and msg.get("source") == "model":
+            self._note_model(msg, now)
         if not model_ok:
             msg = {k: v for k, v in msg.items() if k in ("type", "t", "device_id")}
             msg["source"] = "links"
@@ -702,8 +742,9 @@ class PersonTracker:
         if not self.moving and self._stop_near_exit and still > LEAVE_S and breath is None:
             self.left = True
         seen = self.last_moving_t is not None
-        status = ("ждём движения" if not seen else "вышел" if self.left else "движется" if self.moving
-                  else "неподвижен")
+        empty = self.nobody_home(now)
+        status = ("никого нет" if empty else "ждём движения" if not seen else "вышел" if self.left
+                  else "движется" if self.moving else "неподвижен")
         act = max(self._act, key=self._act.get) if self._act else None
         strong = [(d, s_) for (d, s_), ln in self._links.items()
                   if ln.on_since is not None and now - ln.t <= LINK_MAX_AGE_S and ln.t - ln.on_since >= COUNT_HOLD_S]
@@ -712,7 +753,7 @@ class PersonTracker:
             n_min = max(n_min, 1)
         out = {
             "type": "person", "t": now, "moving": self.moving,
-            "present": seen and not self.left, "status": status,
+            "present": seen and not self.left and not empty, "status": status,
             "zone": g.labels[self.shown], "zone_p": round(float(masses[self.shown]), 3),
             "xy": [round(float(self.xy[0]), 2), round(float(self.xy[1]), 2)], "spread_m": round(spread, 2),
             "activity": (act if act and act != "нет движения" else "движется") if self.moving else "нет движения",
@@ -753,8 +794,12 @@ class PersonTracker:
         g = self.grid
         board_room = {dev: g.labels[g.label_idx[int(np.argmin(np.hypot(*(g.xy - p).T)))]]
                       for dev, p in g.boards.items()}
-        # движение в зоне: зона выбрана по геометрии возмущённых линий; сила — самая активная из её линий
-        local = {lab: min(1.0, ROOM_MOTION_ON + m) for lab, m in self._cover_now(now).items()}
+        if self.model_fresh(now):  # модель квартиры: P(в зоне) x P(движется)
+            source = "model"
+            local = {lab: min(1.0, m) for lab, m in self._model_rooms.items()}
+        else:  # без модели: зона по геометрии возмущённых линий; сила — самая активная из её линий
+            source = "links"
+            local = {lab: min(1.0, ROOM_MOTION_ON + m) for lab, m in self._cover_now(now).items()}
         breath: dict[str, float] = {}
         for (dev, src), (tb, bpm) in self._link_breath.items():
             if now - tb <= BREATH_FRESH_S:
@@ -781,12 +826,13 @@ class PersonTracker:
             rooms.append({
                 "name": lab, "motion": round(m, 2),
                 "state": "движение" if m >= ROOM_MOTION_ON else "слабое" if m >= 0.15 else "тихо",
-                "source": "links",
+                "source": source,
                 "quiet_s": None if last is None else round(now - last, 1),
                 "breath_bpm": round(breath[lab]) if lab in breath else None,
                 "hist": hist,
             })
-        return {"type": "rooms", "t": now, "rooms": rooms, "boards": board_room}
+        return {"type": "rooms", "t": now, "rooms": rooms, "boards": board_room, "source": source,
+                "nobody_home": self.nobody_home(now)}
 
     def reset(self) -> None:
         """Forget the position (wrong after a stuck estimate): uniform belief, waiting for movement again."""

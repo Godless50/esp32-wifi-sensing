@@ -1,0 +1,22 @@
+{
+ "git": "d951402",
+ "built": "2026-10-14 20:47:14",
+ "images": {
+  "main": {
+   "file": "wsn-main.bin",
+   "flash": "16MB",
+   "psram": true,
+   "bytes": 1081088,
+   "sha256": "d7ef17e59f1c1149b7c44da396cfb1be3b5710d414f70a1f86c2b1ffeca96840",
+   "fw_id": "80971bc9"
+  },
+  "lite": {
+   "file": "wsn-lite.bin",
+   "flash": "8MB",
+   "psram": false,
+   "bytes": 1070224,
+   "sha256": "7f88dbbb5e0348b1931b264b60fffc13a5f46ec1355929120b311323d3e84a58",
+   "fw_id": "80bb5fcf"
+  }
+ }
+}

@@ -28,6 +28,11 @@ class CaptureClient(
         private set
     var owner = false
         private set
+    /** Boards and access points on the air (server "state"): what to mark on the plan. */
+    var devices: List<Device> = emptyList()
+        private set
+
+    data class Device(val mac: String, val role: String, val name: String)
 
     private var poseSeq = 0
     private var eventSeq = 0
@@ -71,6 +76,13 @@ class CaptureClient(
                 owner = m.optBoolean("owner")
                 clockSynced = m.optBoolean("clock_synced")
                 if (m.has("csi_hz")) csiHz = m.optDouble("csi_hz", 0.0)
+                m.optJSONArray("devices")?.let { arr ->
+                    devices = (0 until arr.length()).mapNotNull { i ->
+                        val d = arr.optJSONObject(i) ?: return@mapNotNull null
+                        val mac = d.optString("mac")
+                        if (mac.isEmpty()) null else Device(mac, d.optString("role"), d.optString("name", mac))
+                    }
+                }
             }
             "error" -> onError(m.optString("code"), m.optString("message"))
         }

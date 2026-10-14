@@ -5,7 +5,8 @@
 # Плата пишет образ во второй раздел приложения, проверяет его, загружается и подтверждает только после выхода
 # в Wi-Fi; иначе через 2 минуты загрузчик возвращает прежнюю прошивку. Ход: GET /api/model/push.
 set -euo pipefail
-R=/home/ops/esp32-wifi-sensing
+R="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$R/data/ml"
 case "${1:?main|lite|debug}" in
   main) BIN=$R/firmware/build/wsn_fw.bin ;;
   lite) BIN=$R/firmware/build_lite/wsn_fw.bin ;;

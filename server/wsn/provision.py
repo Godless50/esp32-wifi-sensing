@@ -1,13 +1,17 @@
-"""Provision the board over its USB console.
+"""Provision boards over their USB console (install.sh runs this in the server image).
 
-python -m wsn.provision --port /dev/ttyACM0 --ssid HomeNet --bssid 02:00:00:00:a1:18 --host 192.168.4.77
-Wi-Fi password: env WSN_WIFI_PASS or interactive prompt. Never written to disk.
+python -m wsn.provision scan --port /dev/ttyACM0            networks the board sees (JSON)
+python -m wsn.provision --port P1 --port P2 --ssid S --host 192.168.1.10 --password-stdin
+The access point is the strongest node of the network for each board unless --bssid is given.
+Wi-Fi password: stdin (--password-stdin), env WSN_WIFI_PASS or an interactive prompt. It goes only into the
+board's NVS; never to disk, logs or the command line.
 """
 
 from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
 import re
 import secrets
@@ -18,6 +22,34 @@ from pathlib import Path
 from .keys import KeyStore
 
 _STATUS_RE = re.compile(r"^STATUS\s+(.*)$")
+_AP_RE = re.compile(r"^AP\s+([0-9a-fA-F:]{17})\s+ch=(\d+)\s+rssi=(-?\d+)\s+ssid=(.*)$")
+
+
+def parse_scan(lines) -> list[dict]:
+    """Lines of the board's `scan` answer -> access points (bssid, ch, rssi, ssid)."""
+    out = []
+    for line in lines:
+        m = _AP_RE.match(line.strip())
+        if m:
+            out.append({"bssid": m[1].lower(), "ch": int(m[2]), "rssi": int(m[3]), "ssid": m[4]})
+        elif line.strip().startswith("AP_END"):
+            break
+    return out
+
+
+def best_bssid(aps: list[dict], ssid: str) -> str | None:
+    """Strongest access point of the network (with a mesh: the node nearest to this board)."""
+    mine = [a for a in aps if a["ssid"] == ssid]
+    return max(mine, key=lambda a: a["rssi"])["bssid"] if mine else None
+
+
+def networks(aps: list[dict]) -> list[tuple[str, int]]:
+    """Visible networks, strongest first: (ssid, best rssi)."""
+    best: dict[str, int] = {}
+    for a in aps:
+        if a["ssid"]:
+            best[a["ssid"]] = max(best.get(a["ssid"], -999), a["rssi"])
+    return sorted(best.items(), key=lambda x: -x[1])
 
 
 def console_quote(s: str) -> str:
@@ -62,6 +94,13 @@ class Console:
             if needle in line:
                 return line
         return None
+
+    def scan(self, seconds: float = 10.0) -> list[dict]:
+        self.send("scan")
+        return parse_scan(self.lines(seconds))
+
+    def close(self) -> None:
+        self.ser.close()
 
     def status(self, seconds: float = 3.0) -> dict[str, str] | None:
         self.send("status")
@@ -119,20 +158,56 @@ def provision(port: str, ssid: str, bssid: str, host: str, password: str, udp_po
     return 4, f"{mac}: board did not reach wifi=CONNECTED (wrong password?)"
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="/dev/ttyACM0")
-    ap.add_argument("--ssid", required=True)
-    ap.add_argument("--bssid", required=True)
-    ap.add_argument("--host", required=True)
+def scan_port(port: str) -> list[dict]:
+    con = Console(port)
+    try:
+        con.send("")
+        if wait_status(con) is None:
+            return []
+        return con.scan()
+    finally:
+        con.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Wi-Fi, server address and key into boards over USB")
+    ap.add_argument("cmd", nargs="?", choices=("set", "scan"), default="set",
+                    help="set: provision (default); scan: print the networks the board sees (JSON)")
+    ap.add_argument("--port", action="append", help="serial port; repeat for several boards (default /dev/ttyACM0)")
+    ap.add_argument("--ssid")
+    ap.add_argument("--bssid", help="access point; default: the strongest node of the network for each board")
+    ap.add_argument("--host")
     ap.add_argument("--udp-port", type=int, default=5005)
     ap.add_argument("--keys", default="/data/device_keys.json")
     ap.add_argument("--wait", type=float, default=40.0, help="seconds to wait for wifi=CONNECTED")
-    a = ap.parse_args()
-    password = os.environ.get("WSN_WIFI_PASS") or getpass.getpass("Wi-Fi password: ")
-    rc, msg = provision(a.port, a.ssid, a.bssid, a.host, password, a.udp_port, a.keys, a.wait)
-    print(("ERROR: " if rc else "") + msg, file=sys.stderr if rc else sys.stdout)
-    return rc
+    ap.add_argument("--password-stdin", action="store_true", help="read the Wi-Fi password from the first line of stdin")
+    a = ap.parse_args(argv)
+    ports = a.port or ["/dev/ttyACM0"]
+    if a.cmd == "scan":
+        aps = [x for p in ports for x in scan_port(p)]
+        print(json.dumps({"aps": aps, "networks": networks(aps)}, ensure_ascii=False))
+        return 0 if aps else 2
+    if not a.ssid or not a.host:
+        ap.error("set needs --ssid and --host")
+    if a.password_stdin:
+        password = sys.stdin.readline().rstrip("\r\n")
+    else:
+        password = os.environ.get("WSN_WIFI_PASS") or getpass.getpass("Wi-Fi password: ")
+    worst = 0
+    for port in ports:
+        bssid = a.bssid
+        if not bssid:
+            bssid = best_bssid(scan_port(port), a.ssid)
+            if not bssid:
+                print(f"ERROR: {port}: the board does not see the network {a.ssid!r}", file=sys.stderr, flush=True)
+                worst = max(worst, 5)
+                continue
+        rc, msg = provision(port, a.ssid, bssid, a.host, password, a.udp_port, a.keys, a.wait)
+        print(("ERROR: " if rc else "OK ") + msg + ("" if rc else f" (access point {bssid})"),
+              file=sys.stderr if rc else sys.stdout, flush=True)
+        worst = max(worst, rc)
+    del password
+    return worst
 
 
 if __name__ == "__main__":

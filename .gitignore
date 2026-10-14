@@ -11,7 +11,7 @@ secrets*
 firmware/components/wsn_proto/test/host_test
 firmware/components/wsn_proto/test/golden_bin
 firmware/components/wsn_proto/test/util_test
-.gradle-cache/
+.gradle-cache
 ui/download/
 node_modules/
 .venv-rocm/
@@ -26,3 +26,6 @@ firmware/sdkconfig_main.out.old
 firmware/sdkconfig_debug.out
 firmware/sdkconfig_debug.out.old
 firmware/build_debug/
+deploy/.env
+.fwbuild.log
+android/.kotlin/

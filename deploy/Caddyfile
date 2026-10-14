@@ -7,12 +7,18 @@
 https://{$WSN_HOST}:8443 {
 	tls internal
 
-	# Корневой сертификат локального CA — для установки на телефон (без авторизации).
+	# Корневой сертификат локального CA — без пароля: приложение сверяет его SHA-256 с QR-кодом install.sh.
 	handle /ca.crt {
 		root * /data/caddy/pki/authorities/local
 		rewrite * /root.crt
 		header Content-Type application/x-x509-ca-cert
 		file_server
+	}
+
+	# Приложение для телефона — без пароля (в нём нет секретов), чтобы скачать его браузером телефона.
+	handle /app.apk {
+		rewrite * /static/download/wsn.apk
+		reverse_proxy api:8080
 	}
 
 	handle {

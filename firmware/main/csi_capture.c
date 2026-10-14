@@ -8,6 +8,7 @@
 #include "esp_wifi.h"
 #include "freertos/ringbuf.h"
 #include "settings.h"
+#include "wsn_util.h"
 
 static const char *TAG = "csi";
 
@@ -106,6 +107,30 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info)
     s_cnt.rssi_sum += rx->rssi;
     s_cnt.rssi_n++;
     portEXIT_CRITICAL(&s_mux);
+}
+
+bool csi_capture_add_link(const uint8_t mac[6])
+{
+    /* Вызывается из колбэка ESP-NOW (задача Wi-Fi, там же и csi_cb). Сначала адрес, потом счётчик:
+     * csi_cb не увидит наполовину записанный элемент. */
+    bool added = false;
+    portENTER_CRITICAL(&s_mux);
+    size_t k;
+    for (k = 0; k < s_tx_n && memcmp(mac, s_tx[k], 6) != 0; k++) {
+    }
+    if (k == s_tx_n && s_tx_n > 0 && s_tx_n < MAX_TX) {
+        memcpy(s_tx[s_tx_n], mac, 6);
+        s_tx_last[s_tx_n] = 0;
+        __atomic_store_n(&s_tx_n, s_tx_n + 1, __ATOMIC_RELEASE);
+        added = true;
+    }
+    portEXIT_CRITICAL(&s_mux);
+    if (added) {
+        char m[18];
+        wsn_format_mac(mac, m);
+        ESP_LOGI(TAG, "new board link %s (%u transmitters)", m, (unsigned)s_tx_n);
+    }
+    return added;
 }
 
 esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const uint8_t (*links)[6], size_t n_links,
