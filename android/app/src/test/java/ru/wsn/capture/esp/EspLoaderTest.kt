@@ -16,6 +16,7 @@ class EspLoaderTest {
         private val flash = HashMap<Long, Byte>()
         private val regs = HashMap<Long, Long>()
         var tamper = false
+        var jedecId = 0x184020L  // ёмкость 0x18 = 16 МБ
 
         init {
             // eFuse BLOCK1: MAC 7c:4f:ad:bc:9b:54, flash cap 3 (16 MB), psram cap 1 (8 MB octal)
@@ -30,7 +31,7 @@ class EspLoaderTest {
 
         private fun respond(op: Int, value: Long, payload: ByteArray) {
             val b = ByteArrayOutputStream()
-            val data = payload + byteArrayOf(0, 0) // 2 trailing status bytes (status, err)
+            val data = payload + byteArrayOf(0, 0, 0x5A, 0x98.toByte()) // status, err + 2 reserved (junk, as on the real ROM)
             b.write(0x01); b.write(op)
             b.write(le(data.size.toLong(), 2)); b.write(le(value, 4)); b.write(data)
             outbox.write(Slip.encode(b.toByteArray()))
@@ -46,7 +47,13 @@ class EspLoaderTest {
             when (op) {
                 EspLoader.SYNC -> respond(op, 0, ByteArray(0))
                 EspLoader.READ_REG -> respond(op, regs[u32(data, 0)] ?: 0, ByteArray(0))
-                EspLoader.WRITE_REG -> { regs[u32(data, 0)] = u32(data, 4); respond(op, 0, ByteArray(0)) }
+                EspLoader.WRITE_REG -> {
+                    val a = u32(data, 0); val v = u32(data, 4)
+                    if (a == EspLoader.SPI_CMD && v and (1L shl 18) != 0L) {  // команда SPI: RDID готов сразу
+                        regs[EspLoader.SPI_W0] = jedecId; regs[a] = 0
+                    } else regs[a] = v
+                    respond(op, 0, ByteArray(0))
+                }
                 EspLoader.GET_SECURITY_INFO -> {
                     val p = ByteArray(20); p[12] = EspLoader.CHIP_ID_S3.toByte(); respond(op, 0, p)
                 }
@@ -102,6 +109,28 @@ class EspLoaderTest {
         assertEquals("7c:4f:ad:bc:9b:54", info.mac)
         assertEquals(16, info.flashMb)
         assertTrue(info.psramOctal)
+    }
+
+    @Test fun flashSizeFromJedecWhenEfuseIsSilent() {
+        val rom = FakeRom()
+        rom.write(ByteArray(0))
+        val l = EspLoader(rom)
+        val noEfuse = l.chipInfo().copy(flashMb = 0)       // модуль: флеш вне корпуса, в eFuse ёмкости нет
+        assertEquals(16, l.flashSizeMb(noEfuse))
+        rom.jedecId = 0x174020L
+        assertEquals(8, l.flashSizeMb(noEfuse))
+    }
+
+    @Test fun watchdogsOffOnlyOverUsbJtag() {
+        val rom = FakeRom()
+        val l = EspLoader(rom)
+        l.disableWatchdogs()                                 // UART: ничего не трогаем
+        assertEquals(0L, l.readReg(EspLoader.SWD_CONF))
+        rom.write(ByteArray(0))
+        l.writeReg(EspLoader.UARTDEV_BUF_NO, EspLoader.UARTDEV_USB_JTAG)
+        l.disableWatchdogs()
+        assertEquals(1L shl 31, l.readReg(EspLoader.SWD_CONF))
+        assertEquals(0L, l.readReg(EspLoader.RTC_WDT_CONFIG0))
     }
 
     @Test fun choosesMainImageForN16R8() {

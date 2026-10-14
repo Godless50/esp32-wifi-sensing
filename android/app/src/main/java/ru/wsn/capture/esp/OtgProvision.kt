@@ -17,14 +17,16 @@ class OtgProvision(
         var port = openPort()
         val loader = EspLoader(port)
         loader.connect()
-        val info = loader.chipInfo()
+        loader.disableWatchdogs()                        // иначе сторож приложения сбрасывает чип посреди записи
+        loader.spiAttach()
+        val chip = loader.chipInfo()
+        val info = chip.copy(flashMb = loader.flashSizeMb(chip))
         log("chip ${info.chipId} mac ${info.mac} flash ${info.flashMb}MB psram=${info.psramOctal}")
         val which = loader.chooseImage(info)
         val image = images[which] ?: throw EspLoader.EspError("no image '$which' bundled")
-        loader.spiAttach()
         loader.spiSetParams(info.flashMb.toLong() * 1024 * 1024)
         loader.flashImage(0x0, image, onProgress)       // verifies by MD5, throws on mismatch
-        loader.finishFlash(reboot = true)
+        loader.watchdogReset()                           // запуск прошивки (выход из ПЗУ по USB-Serial/JTAG)
         port.close()
 
         Thread.sleep(2500)                               // the app firmware boots and re-enumerates

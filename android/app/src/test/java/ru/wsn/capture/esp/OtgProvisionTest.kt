@@ -17,7 +17,7 @@ class OtgProvisionTest {
         private fun le(v: Long, n: Int) = ByteArray(n) { ((v shr (8 * it)) and 0xFF).toByte() }
         private fun u32(d: ByteArray, o: Int) = (0 until 4).fold(0L) { a, i -> a or ((d[o + i].toLong() and 0xFF) shl (8 * i)) }
         private fun respond(op: Int, value: Long, payload: ByteArray) {
-            val data = payload + byteArrayOf(0, 0)
+            val data = payload + byteArrayOf(0, 0, 0x5A, 0x98.toByte())
             val b = ByteArrayOutputStream(); b.write(0x01); b.write(op); b.write(le(data.size.toLong(), 2)); b.write(le(value, 4)); b.write(data)
             outbox.write(Slip.encode(b.toByteArray()))
         }
@@ -25,7 +25,8 @@ class OtgProvisionTest {
             val op = f[1].toInt() and 0xFF; val size = (f[2].toInt() and 0xFF) or ((f[3].toInt() and 0xFF) shl 8)
             val d = f.copyOfRange(8, 8 + size)
             when (op) {
-                EspLoader.SYNC, EspLoader.SPI_ATTACH, EspLoader.SPI_SET_PARAMS, EspLoader.FLASH_END -> respond(op, 0, ByteArray(0))
+                EspLoader.SYNC, EspLoader.SPI_ATTACH, EspLoader.SPI_SET_PARAMS, EspLoader.FLASH_END,
+                EspLoader.WRITE_REG -> respond(op, 0, ByteArray(0))
                 EspLoader.READ_REG -> respond(op, regs[u32(d, 0)] ?: 0, ByteArray(0))
                 EspLoader.GET_SECURITY_INFO -> ByteArray(20).also { it[12] = 9 }.let { respond(op, 0, it) }
                 EspLoader.FLASH_BEGIN -> { base = u32(d, 12); respond(op, 0, ByteArray(0)) }
