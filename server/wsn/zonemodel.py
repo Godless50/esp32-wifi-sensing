@@ -339,4 +339,6 @@ class LiveInfer:
             "created": m.meta.get("created") if m else None,
             "metrics": m.meta.get("metrics") if m else None,
             "links_seen": sorted(self.buf),
+            # линии, по которым кадры идут прямо сейчас: обучение берёт только записи на этих же линиях
+            "links_now": sorted(k for k, q in self.buf.items() if q and q[-1][0] >= time.monotonic() - 10.0),
         }

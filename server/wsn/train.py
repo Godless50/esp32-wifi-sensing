@@ -424,6 +424,7 @@ def run(a, status: Status) -> dict:
     cands = pick_sessions(store, plan, a.sessions.split(",") if a.sessions else None)
     say(f"Зоны плана: {', '.join(lab.zones[:-1])}")
     recs, links, quiet_floors = [], None, None
+    live = set(a.live_links.split(",")) - {""} if a.live_links else None  # линии в эфире сейчас (train.sh)
     for n, info in enumerate(cands, 1):
         status.set("running", "load", 0.4 * n / len(cands), f"чтение записи {info.id}")
         say(f"Запись {info.id} ({info.kind}, {(info.stopped - info.started) / 60:.1f} мин): чтение CSI…")
@@ -432,12 +433,20 @@ def run(a, status: Status) -> dict:
         if len(ends) < 10:
             say("  слишком короткая — пропуск")
             continue
-        if links is None:  # самая новая запись задаёт набор линий
+        if links is None:  # самая новая подходящая запись задаёт набор линий
             share = {lk: float(np.mean([s is not None for s in st]))
-                     for lk, st in recording_stats(rec, sorted(rec.frames), ends).items()}
-            links = sorted(lk for lk, v in share.items() if v >= LINK_MIN_SHARE)
-            if not links:
-                raise SystemExit("в записи нет живых линий: платы не передавали CSI во время обхода")
+                     for lk, st in recording_stats(rec, sorted(rec.frames), ends).items()
+                     if not lk.endswith("|")}  # кадры без передатчика (старая прошивка) — не линия
+            cand = sorted(lk for lk, v in share.items() if v >= LINK_MIN_SHARE)
+            if live is not None:
+                same = len(set(cand) & live) / max(1, len(live))
+                if same < SAME_LINKS:
+                    say(f"  записана на других платах или линиях (совпадает {same:.0%} нынешних) — пропуск")
+                    continue
+            if not cand:
+                say("  в записи нет живых линий — пропуск")
+                continue
+            links = cand
             say(f"  линий: {len(links)} ({', '.join(links)})")
         Z, M = lab.labels(rec, ends)
         X, warm = recording_features(rec, links, ends, quiet=Z[:, lab.E] == 1)
@@ -451,7 +460,8 @@ def run(a, status: Status) -> dict:
             f"движение да/нет {int((M == 1).sum())}/{int((M == 0).sum())}")
         recs.append((info.id, ends, X, Z, M))
     if not recs:
-        raise SystemExit("нет подходящих записей")
+        raise SystemExit("нет записи обхода на нынешних платах: пройдите сценарий в приложении и нажмите «Сохранить»"
+                         if live is not None else "нет подходящих записей")
     rec_idx = np.concatenate([np.full(len(r[1]), i) for i, r in enumerate(recs)])
     ends = np.concatenate([r[1] for r in recs])
     X = np.concatenate([r[2] for r in recs])
@@ -459,6 +469,9 @@ def run(a, status: Status) -> dict:
     M = np.concatenate([r[4] for r in recs])
     keep = (Z.sum(axis=1) > 0) | (M >= 0)
     rec_idx, ends, X, Z, M = rec_idx[keep], ends[keep], X[keep], Z[keep], M[keep]
+    room_windows = int(((Z.sum(axis=1) == 1) & (Z[:, lab.E] == 0)).sum())
+    if not a.sessions and room_windows < MIN_WINDOWS // 2:  # одни «пусто» — комнатам не научить
+        raise SystemExit("в записях почти нет окон с известной комнатой: пройдите сценарий обхода в приложении")
     if len(X) < MIN_WINDOWS:
         raise SystemExit(f"мало размеченных окон ({len(X)} < {MIN_WINDOWS}): запишите обход подольше")
     cfg = FitConfig(epochs=a.epochs)
@@ -534,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--out", default="", help="папка модели (по умолчанию <data>/model)")
     ap.add_argument("--dry-run", action="store_true", help="только проверка качества, модель не сохранять")
+    ap.add_argument("--live-links", default="", help="линии в эфире сейчас (через запятую): записи на других "
+                    "платах пропускаются (train.sh берёт их у сервера)")
     a = ap.parse_args(argv)
     data = Path(a.data)
     (data / "run").mkdir(parents=True, exist_ok=True)

@@ -61,16 +61,37 @@ check_prereq() {
   printf 'WSN_UID=%s\nWSN_GID=%s\nWSN_TZ=%s\n' "$(id -u)" "$(id -g)" "${tz:-UTC}" > "$ROOT/deploy/.env"
 }
 
+lan_ips() {  # адреса компьютера в домашней сети: только физические сетевые карты (не Docker, не VPN, не мосты)
+  local ifc ip
+  ip -4 -o addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print $2, a[1]}' | while read -r ifc ip; do
+    if [ -e "/sys/class/net/$ifc/device" ]; then echo "$ip"; fi
+  done
+}
+
 detect_host() {
-  local saved now
+  local saved ips n i
   saved=$(grep -s '^WSN_HOST=' "$DATA/caddy.env" | cut -d= -f2 || true)
-  now=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')
-  HOST=${HOST_ARG:-${saved:-$now}}
-  [ -n "$HOST" ] || HOST=$(ask "Адрес этого компьютера в домашней сети (IP)")
-  [ -n "$HOST" ] || die "не задан адрес компьютера"
-  if [ -n "$saved" ] && [ -n "$now" ] && [ "$saved" != "$now" ] && [ -z "$HOST_ARG" ]; then
-    warn "раньше компьютер был $saved, сейчас $now. Платы шлют данные на $saved."
-    warn "Закрепите адрес за компьютером в роутере или перенастройте платы: ./install.sh --host $now wifi"
+  ips=$(lan_ips)
+  if [ -n "$HOST_ARG" ]; then
+    HOST=$HOST_ARG
+  elif [ -n "$saved" ] && grep -qxF "$saved" <<<"$ips"; then
+    HOST=$saved
+  else
+    n=$(grep -c . <<<"$ips" || true)
+    if [ "$n" = 1 ]; then
+      HOST=$ips
+    elif [ "$n" -gt 1 ]; then
+      echo "  Адреса этого компьютера:"; i=0
+      while read -r ip; do i=$((i + 1)); echo "   $i) $ip"; done <<<"$ips"
+      i=$(ask "Какой из них в той же сети Wi-Fi, что и платы (номер)" 1)
+      HOST=$(sed -n "${i}p" <<<"$ips")
+    fi
+    [ -n "${HOST:-}" ] || HOST=$(ask "Адрес этого компьютера в домашней сети (IP)")
+    [ -n "$HOST" ] || die "не задан адрес компьютера"
+    if [ -n "$saved" ] && [ "$saved" != "$HOST" ]; then
+      warn "раньше сервер был на $saved, теперь $HOST: платы шлют данные на старый адрес."
+      warn "Перенастройте их (./install.sh wifi) и закрепите адрес за компьютером в роутере"
+    fi
   fi
 }
 
@@ -120,7 +141,7 @@ start_server() {
 # ---------------------------------------------------------------- платы
 board_ports() {  # платы ESP32-S3 на USB (встроенный USB-Serial/JTAG): постоянные имена, номер ttyACM может меняться
   local p
-  for p in /dev/serial/by-id/*Espressif*; do [ -e "$p" ] && echo "$p"; done
+  for p in /dev/serial/by-id/*Espressif*; do if [ -e "$p" ]; then echo "$p"; fi; done
 }
 
 in_image() {  # команда в образе сервера с доступом к портам плат: in_image "<порт> [порт…]" cmd...

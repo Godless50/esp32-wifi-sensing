@@ -29,8 +29,16 @@ done
 
 "${COMPOSE[@]}" ps --status running api 2>/dev/null | grep -q api \
   || { echo "сервер не запущен: ./install.sh" >&2; exit 1; }
-OLD=$("${COMPOSE[@]}" exec -T api python -c \
-  "import json, urllib.request; m = json.load(urllib.request.urlopen('http://127.0.0.1:8080/api/model'))['model'] or {}; print(m.get('version') or 0)")
+MODEL=$("${COMPOSE[@]}" exec -T api python -c "import json, urllib.request
+m = json.load(urllib.request.urlopen('http://127.0.0.1:8080/api/model'))['model'] or {}
+print(m.get('version') or 0, ','.join(m.get('links_now') or []))")
+OLD=${MODEL%% *}
+LIVE=${MODEL#* }
+if [ -z "$LIVE" ] || [ "$LIVE" = "$MODEL" ]; then
+  echo "сервер сейчас не получает данных от плат — включите их (./install.sh status)" >&2
+  exit 1
+fi
+ARGS+=(--live-links "$LIVE")  # записи, сделанные на других платах или линиях, обучение пропустит
 printf '\033[1mОбучение модели квартиры (ядер процессора: %s)\033[0m\n' "$(nproc)"
 START=$(date +%s)
 # пониженный приоритет: сервер в том же контейнере продолжает принимать данные плат без потерь

@@ -149,3 +149,15 @@ def test_live_inference_matches_training(trained):
     out = run("out", 5090.0, 30)[-10:]
     assert np.mean([m["empty_p"] for m in out]) > 0.7
     assert got and got[-1]["type"] == "pred" and got[-1]["source"] == "model"
+
+
+def test_recordings_on_other_links_are_not_trained(tmp_path):
+    store = Store(tmp_path / "wsn.db", tmp_path / "sessions")
+    synth_session(store, 1000.0)
+    other = "aa:aa:aa:aa:aa:01|aa:aa:aa:aa:aa:02,aa:aa:aa:aa:aa:01|aa:aa:aa:aa:aa:03"
+    rc = T.main(["--data", str(tmp_path), "--nets", "1", "--folds", "2", "--epochs", "2", "--jobs", "1",
+                 "--live-links", other])
+    assert rc == 2
+    assert not (tmp_path / "model").exists()
+    st = json.loads((tmp_path / "run" / "train_status.json").read_text())
+    assert st["state"] == "error" and "нынешних платах" in st["message"]
