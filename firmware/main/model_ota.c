@@ -71,10 +71,22 @@ static bool verify(const esp_partition_t *p, uint32_t total)
     return ok;
 }
 
+static bool s_paused;  /* эта загрузка поставила захват на паузу (паузы считаются: пара pause/resume ровно одна) */
+
+static void ota_pause(void)
+{
+    if (!s_paused) { csi_capture_pause(); s_paused = true; }
+}
+
+static void ota_resume(void)
+{
+    if (s_paused) { csi_capture_resume(); s_paused = false; }
+}
+
 static void ota_fail(uint32_t ver, uint32_t received, uint8_t error)
 {
     set_state(ver, received, WSN_OTA_ERROR, error);
-    csi_capture_resume();
+    ota_resume();
 }
 
 static void ota_task(void *arg)
@@ -107,7 +119,7 @@ static void ota_task(void *arg)
                 if (!dst) { set_state(it.version, 0, WSN_OTA_ERROR, 1); continue; }
                 if (it.total < HDR || it.total > dst->size) { set_state(it.version, 0, WSN_OTA_ERROR, 2); continue; }
             }
-            if (!cfg) csi_capture_pause();  /* запись во флеш при включённом прослушивании эфира роняла плату */
+            if (!cfg) ota_pause();  /* запись во флеш при включённом прослушивании эфира роняла плату */
             if (app) {
                 if (esp_ota_begin(app_part, OTA_WITH_SEQUENTIAL_WRITES, &app_h) != ESP_OK) {
                     ota_fail(it.version, 0, 7);
@@ -140,11 +152,23 @@ static void ota_task(void *arg)
                 continue;
             }
             static wsn_settings_t st;
-            if (settings_load(&st) != ESP_OK) { set_state(ver, received, WSN_OTA_ERROR, 13); ver = 0; continue; }
-            st.n_links = n;
+            csi_capture_flash_begin();  /* чтение-правка-запись настроек — под общим замком (опрос сети, центр) */
+            if (settings_load(&st) != ESP_OK) {
+                csi_capture_flash_end();
+                set_state(ver, received, WSN_OTA_ERROR, 13); ver = 0; continue;
+            }
+            /* устройства дома из опроса сети (с адресом для пинга) остаются; линии сервера — заменяются */
+            uint8_t dev[WSN_MAX_LINKS][6];
+            uint32_t dev_ip[WSN_MAX_LINKS];
+            size_t nd = 0;
+            for (size_t i = 0; i < st.n_links; i++)
+                if (st.link_ip[i]) { memcpy(dev[nd], st.links[i], 6); dev_ip[nd++] = st.link_ip[i]; }
             memset(st.links, 0, sizeof(st.links));
-            memcpy(st.links, cfg_buf + 5, 6u * n);
-            memset(st.link_ip, 0, sizeof(st.link_ip));  /* линии с сервера: их пингует сервер, не плата */
+            memset(st.link_ip, 0, sizeof(st.link_ip));
+            size_t m = 0;
+            for (size_t i = 0; i < n && m < WSN_MAX_LINKS; i++) memcpy(st.links[m++], cfg_buf + 5 + 6 * i, 6);
+            for (size_t i = 0; i < nd && m < WSN_MAX_LINKS; i++) { memcpy(st.links[m], dev[i], 6); st.link_ip[m++] = dev_ip[i]; }
+            st.n_links = (uint8_t)m;
             if (total >= 7u + 6u * n) {
                 st.promisc = cfg_buf[5 + 6 * n] ? 1 : 0;
                 st.beacon_hz = cfg_buf[6 + 6 * n];
@@ -153,8 +177,8 @@ static void ota_task(void *arg)
                 static const uint8_t zero[6] = {0};
                 if (memcmp(cfg_buf + 7 + 6 * n, zero, 6) != 0) memcpy(st.bssid, cfg_buf + 7 + 6 * n, 6);
             }
-            csi_capture_pause();  /* запись в NVS */
             esp_err_t err = settings_save(&st);
+            csi_capture_flash_end();
             if (err != ESP_OK) { ota_fail(ver, received, 14); ver = 0; continue; }
             ESP_LOGI(TAG, "links set over the air: %u transmitters, restarting", n);
             set_state(ver, received, WSN_OTA_ACTIVATING, 0);

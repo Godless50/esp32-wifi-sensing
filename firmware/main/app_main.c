@@ -251,8 +251,8 @@ void app_main(void)
     warn_if(err, "wifi start");
     if (complete && err == ESP_OK && boot_id != 0) {
         wsn_flash_quiet = true;
-        err = csi_capture_start(s_settings.bssid, s_settings.csi_source, s_settings.links, s_settings.n_links,
-                                s_settings.promisc != 0);
+        err = csi_capture_start(s_settings.bssid, s_settings.csi_source, s_settings.links, s_settings.link_ip,
+                                s_settings.n_links, s_settings.promisc != 0);
         warn_if(err, "csi capture");
         if (err == ESP_OK) warn_if(uplink_start(&s_settings, boot_id), "uplink");
         if (err == ESP_OK) warn_if(model_ota_start(), "model OTA");

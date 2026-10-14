@@ -66,10 +66,13 @@ class LocalLink(
 ) : CaptureLink {
     private val main = Handler(Looper.getMainLooper())
     private var open = false
+    private var closed = false
+    private val retry = Runnable { if (!closed) connect() }
 
     override fun connect() {
+        closed = false
         val hub = ru.wsn.capture.hub.HubService.current
-        if (hub == null) { onClosed("центр не запущен"); main.postDelayed({ connect() }, 2000); return }
+        if (hub == null) { onClosed("центр не запущен"); main.postDelayed(retry, 2000); return }
         open = true
         main.post { onOpen() }
     }
@@ -82,5 +85,5 @@ class LocalLink(
         return true
     }
 
-    override fun close() { open = false }
+    override fun close() { open = false; closed = true; main.removeCallbacks(retry) }
 }

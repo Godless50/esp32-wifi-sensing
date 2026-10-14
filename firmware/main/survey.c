@@ -160,13 +160,14 @@ static SemaphoreHandle_t s_cb_done;
 struct arp_sweep {
     struct netif *nif;
     uint32_t net_h;
-    int hosts;
+    int hosts, first, count;  /* эта порция: адреса first..first+count-1 (по кругу 1..hosts) */
 };
 
 static void arp_request_cb(void *arg)
 {
     struct arp_sweep *w = arg;
-    for (int k = 1; k <= w->hosts; k++) {
+    for (int i = 0; i < w->count; i++) {
+        int k = (w->first - 1 + i) % w->hosts + 1;
         ip4_addr_t ip;
         ip4_addr_set_u32(&ip, lwip_htonl(w->net_h | (uint32_t)k));
         etharp_request(w->nif, &ip);
@@ -218,7 +219,15 @@ static int discover(uint32_t me, uint32_t mask, uint32_t *resp, uint8_t (*macs)[
     w.net_h = net_h;
     w.hosts = hosts;
     for (int round = 0; round < 3; round++) {  /* три круга: устройства в энергосбережении отвечают не сразу */
-        if (tcpip_callback(arp_request_cb, &w) == ERR_OK) xSemaphoreTake(s_cb_done, pdMS_TO_TICKS(3000));
+        /* порциями по WAVE с паузой: 254 широковещательных кадра подряд не помещаются в буферы передачи Wi-Fi
+         * (32), лишние терялись бы — всегда одни и те же старшие адреса; каждый круг начинается с другого места */
+        int start = 1 + round * hosts / 3;
+        for (int done = 0; done < hosts; done += WAVE) {
+            w.first = (start - 1 + done) % hosts + 1;
+            w.count = hosts - done < WAVE ? hosts - done : WAVE;
+            if (tcpip_callback(arp_request_cb, &w) == ERR_OK) xSemaphoreTake(s_cb_done, pdMS_TO_TICKS(3000));
+            vTaskDelay(pdMS_TO_TICKS(30));
+        }
         set_progress(WSN_SURVEY_DISCOVER, (uint8_t)(5 + 6 * round), 0);
         vTaskDelay(pdMS_TO_TICKS(800));
     }
@@ -518,18 +527,25 @@ esp_err_t survey_start(const survey_args_t *a)
 esp_err_t survey_set_links(const uint8_t (*macs)[6], const uint32_t *ips, size_t n)
 {
     if (n > WSN_MAX_DEVICE_LINKS) n = WSN_MAX_DEVICE_LINKS;
-    static wsn_settings_t st;
+    static wsn_settings_t st;  /* под замком записи настроек (csi_capture_flash_begin) */
     csi_capture_flash_begin();
     esp_err_t err = settings_load(&st);
     if (err == ESP_OK) {
-        st.n_links = (uint8_t)n;
+        /* линии, заданные сервером на компьютере (без адреса для пинга), остаются; устройства — заменяются */
+        uint8_t keep[WSN_MAX_LINKS][6];
+        size_t nk = 0;
+        for (size_t i = 0; i < st.n_links; i++)
+            if (!st.link_ip[i]) memcpy(keep[nk++], st.links[i], 6);
         memset(st.links, 0, sizeof(st.links));
         memset(st.link_ip, 0, sizeof(st.link_ip));
-        for (size_t i = 0; i < n; i++) {
-            memcpy(st.links[i], macs[i], 6);
-            st.link_ip[i] = ips[i];
+        size_t m = 0;
+        for (size_t i = 0; i < nk && m < WSN_MAX_LINKS; i++) memcpy(st.links[m++], keep[i], 6);
+        for (size_t i = 0; i < n && m < WSN_MAX_LINKS; i++) {
+            memcpy(st.links[m], macs[i], 6);
+            st.link_ip[m++] = ips[i];
         }
-        st.promisc = n > 0;
+        st.n_links = (uint8_t)m;
+        st.promisc = m > 0;
         err = settings_save(&st);
     }
     /* запись кончилась: прослушивание — только если есть устройства-линии (продолжение захвата его не включит) */

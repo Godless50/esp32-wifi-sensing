@@ -24,12 +24,21 @@ class UsbSerialPort private constructor(
         }
     }
 
+    // Всегда просим целый буфер: запрос короче пакета устройства (64 байта) usbfs обрывает переполнением, и ответ
+    // теряется. Лишнее хранится до следующего чтения (загрузчик читает по одному байту).
     private val rx = ByteArray(4096)
+    private var rxPos = 0
+    private var rxLen = 0
     override fun read(buf: ByteArray, timeoutMs: Int): Int {
-        val n = conn.bulkTransfer(epIn, rx, minOf(rx.size, buf.size), timeoutMs.coerceAtLeast(1))
-        if (n <= 0) return 0
-        System.arraycopy(rx, 0, buf, 0, n)
-        return n
+        if (rxPos >= rxLen) {
+            val n = conn.bulkTransfer(epIn, rx, rx.size, timeoutMs.coerceAtLeast(1))
+            if (n <= 0) return 0
+            rxPos = 0; rxLen = n
+        }
+        val k = minOf(buf.size, rxLen - rxPos)
+        System.arraycopy(rx, rxPos, buf, 0, k)
+        rxPos += k
+        return k
     }
 
     override fun setLines(dtr: Boolean, rts: Boolean) {

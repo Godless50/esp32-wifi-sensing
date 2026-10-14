@@ -28,13 +28,15 @@ static csi_hz_fn_t s_csi_hz;
 /* Each setter edits the stored settings (not the running ones); applied after reboot. */
 static int edit(void (*fn)(wsn_settings_t *, char **), char **argv, const char *ok)
 {
-    wsn_settings_t s;
-    if (settings_load(&s) != ESP_OK) {
-        puts("ERR nvs");
-        return 1;
+    static wsn_settings_t s;  /* под замком записи настроек */
+    csi_capture_flash_begin();
+    esp_err_t err = settings_load(&s);
+    if (err == ESP_OK) {
+        fn(&s, argv);
+        err = settings_save(&s);
     }
-    fn(&s, argv);
-    if (settings_save(&s) != ESP_OK) {
+    csi_capture_flash_end();
+    if (err != ESP_OK) {
         puts("ERR nvs");
         return 1;
     }

@@ -13,7 +13,9 @@ class OtgProvision(
     data class Result(val mac: String, val image: String, val flashMd5Ok: Boolean)
 
     /** Returns the board MAC and which image was flashed. onProgress: 0..100 during the write. */
-    fun run(keyHex: String, s: Settings, onProgress: (Int) -> Unit = {}): Result {
+    /** beforeProvision(mac): called once the board's MAC is known and before the key goes into it — the caller
+     *  stores the key first, so a failure later never leaves a board with a key the phone does not have. */
+    fun run(keyHex: String, s: Settings, onProgress: (Int) -> Unit = {}, beforeProvision: (String) -> Unit = {}): Result {
         var port = openPort()
         val loader = EspLoader(port)
         loader.connect()
@@ -37,6 +39,7 @@ class OtgProvision(
             log("ищу сеть «${s.ssid}»")
             console.bestBssid(s.ssid) ?: throw EspLoader.EspError("плата не видит сеть «${s.ssid}» (2,4 ГГц?)")
         }
+        beforeProvision(info.mac)
         val mac = console.provision(Console.Provision(keyHex, s.ssid, s.password, bssid, s.host, s.port))
         port.close()
         log("provisioned $mac on image $which")

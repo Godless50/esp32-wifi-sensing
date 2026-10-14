@@ -30,18 +30,19 @@ size_t csi_capture_sources(csi_src_stat_t *out, size_t cap, bool reset);
 
 /* Must be called after esp_wifi_start(). csi_source: 0 = ht, 1 = lltf.
  * links: extra transmitter MACs whose CSI is forwarded too (enables promiscuous mode when n_links > 0). */
-esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const uint8_t (*links)[6], size_t n_links,
-                            bool promisc);
+esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const uint8_t (*links)[6],
+                            const uint32_t *link_ip, size_t n_links, bool promisc);
 void csi_capture_counters(csi_counters_t *out);
 /* Add a transmitter (another board heard over ESP-NOW) to the captured links; false if known, full or not started. */
 bool csi_capture_add_link(const uint8_t mac[6]);
 
 #define CSI_LINK_AP 0
 #define CSI_LINK_BOARD 1
-#define CSI_LINK_DEVICE 2
+#define CSI_LINK_DEVICE 2 /* устройство дома из опроса сети: плата сама его пингует */
+#define CSI_LINK_CONFIG 3 /* задана сервером на компьютере (его пингует сервер)*/
 /* Kind of link of a transmitter (CSI_LINK_*), -1 = not a link. */
 int csi_capture_link_kind(const uint8_t mac[6]);
-/* Replace the device links (home devices found by the survey); the access point and the boards stay.
+/* Replace the device links (home devices found by the survey); the access point, boards and configured links stay.
  * Returns how many were added (duplicates and overflow are dropped). Thread-safe. */
 size_t csi_capture_set_device_links(const uint8_t (*macs)[6], size_t n);
 /* Sniffer (promiscuous mode, single MPDU frames only) on/off at run time. */

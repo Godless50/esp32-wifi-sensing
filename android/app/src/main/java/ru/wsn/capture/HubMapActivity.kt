@@ -38,6 +38,8 @@ class HubMapActivity : AppCompatActivity() {
         main.post(object : Runnable { override fun run() { update(); main.postDelayed(this, 1000) } })
     }
 
+    override fun onDestroy() { main.removeCallbacksAndMessages(null); super.onDestroy() }
+
     private fun update() {
         val h = HubService.current
         if (h == null) { status.text = "Центр запускается…"; return }

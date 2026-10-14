@@ -38,6 +38,7 @@ static int64_t s_tx_last[MAX_TX];
 #define AP_MIN_US 7000
 static csi_counters_t s_cnt;
 static bool s_promisc;  /* включено ли прослушивание (нужно для дополнительных линий) */
+static int s_pause_n;   /* вложенные паузы захвата на время записи во флеш (csi_capture_pause/resume) */
 static SemaphoreHandle_t s_flash_lock; /* записи настроек из разных задач (опрос сети, адрес центра) */
 static StaticSemaphore_t s_flash_buf;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -156,10 +157,10 @@ size_t csi_capture_set_device_links(const uint8_t (*macs)[6], size_t n)
 {
     portENTER_CRITICAL(&s_mux);
     size_t m = s_tx_n ? 1 : 0;  /* точка доступа остаётся первой */
-    for (size_t k = 1; k < s_tx_n; k++) {  /* платы (ESP-NOW) остаются */
-        if (s_tx_kind[k] != CSI_LINK_BOARD) continue;
+    for (size_t k = 1; k < s_tx_n; k++) {  /* платы (ESP-NOW) и линии, заданные сервером, остаются */
+        if (s_tx_kind[k] == CSI_LINK_DEVICE) continue;
         memmove(s_tx[m], s_tx[k], 6);
-        s_tx_kind[m] = CSI_LINK_BOARD;
+        s_tx_kind[m] = s_tx_kind[k];
         s_tx_last[m] = s_tx_last[k];
         m++;
     }
@@ -190,6 +191,11 @@ esp_err_t csi_capture_set_promisc(bool on)
         wifi_promiscuous_filter_t f = {.filter_mask = WIFI_PROMIS_FILTER_MASK_DATA_MPDU};
         esp_wifi_set_promiscuous_filter(&f);
     }
+    if (__atomic_load_n(&s_pause_n, __ATOMIC_ACQUIRE) > 0) {  /* идёт запись во флеш: включится при продолжении */
+        s_promisc = on;
+        ESP_LOGI(TAG, "promiscuous %s after the flash write", on ? "on" : "off");
+        return ESP_OK;
+    }
     err = esp_wifi_set_promiscuous(on);
     if (err == ESP_OK) s_promisc = on;
     ESP_LOGI(TAG, "promiscuous %s: %s", on ? "on" : "off", esp_err_to_name(err));
@@ -198,8 +204,8 @@ esp_err_t csi_capture_set_promisc(bool on)
 
 bool csi_capture_promisc(void) { return s_promisc; }
 
-esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const uint8_t (*links)[6], size_t n_links,
-                            bool promisc)
+esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const uint8_t (*links)[6],
+                            const uint32_t *link_ip, size_t n_links, bool promisc)
 {
     if (!s_flash_lock) s_flash_lock = xSemaphoreCreateMutexStatic(&s_flash_buf);  /* до задач uplink и опроса */
     memcpy(s_bssid, bssid, 6);
@@ -207,7 +213,7 @@ esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const ui
     s_tx_kind[0] = CSI_LINK_AP;
     s_tx_n = 1;
     for (size_t i = 0; i < n_links && s_tx_n < MAX_TX; i++) {
-        s_tx_kind[s_tx_n] = CSI_LINK_DEVICE;
+        s_tx_kind[s_tx_n] = link_ip && link_ip[i] ? CSI_LINK_DEVICE : CSI_LINK_CONFIG;
         memcpy(s_tx[s_tx_n++], links[i], 6);
     }
     s_source = csi_source;
@@ -236,9 +242,15 @@ esp_err_t csi_capture_start(const uint8_t bssid[6], uint8_t csi_source, const ui
     return ESP_OK;
 }
 
+/* Паузы вложенные (счётчик): захват и прослушивание возвращаются, только когда закончилась последняя запись во
+ * флеш (OTA модели идёт секундами — опрос сети не должен включить прослушивание посреди неё). */
 void csi_capture_pause(void)
 {
     if (!s_ring) return;
+    portENTER_CRITICAL(&s_mux);
+    bool first = s_pause_n++ == 0;
+    portEXIT_CRITICAL(&s_mux);
+    if (!first) return;
     esp_wifi_set_promiscuous(false);
     esp_wifi_set_csi(false);
     ESP_LOGW(TAG, "capture paused (flash write)");
@@ -247,6 +259,10 @@ void csi_capture_pause(void)
 void csi_capture_resume(void)
 {
     if (!s_ring) return;
+    portENTER_CRITICAL(&s_mux);
+    bool last = s_pause_n > 0 && --s_pause_n == 0;
+    portEXIT_CRITICAL(&s_mux);
+    if (!last) return;
     esp_wifi_set_csi(true);
     if (s_promisc) esp_wifi_set_promiscuous(true);
     ESP_LOGI(TAG, "capture resumed");

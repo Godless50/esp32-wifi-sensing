@@ -4,7 +4,7 @@ package ru.wsn.capture.esp
  *  SerialPort. Only the provisioning path writes the Wi-Fi password, and it goes straight into the board's NVS
  *  over the local cable — it is never logged or kept. */
 class Console(private val port: SerialPort) {
-    private val buf = StringBuilder()
+    private val buf = java.io.ByteArrayOutputStream()
 
     fun send(cmd: String) {
         port.write((cmd + "\r\n").toByteArray(Charsets.UTF_8))
@@ -41,9 +41,13 @@ class Console(private val port: SerialPort) {
         while (System.currentTimeMillis() < end) {
             val n = port.read(tmp, (end - System.currentTimeMillis()).toInt().coerceIn(1, ms))
             if (n <= 0) continue
-            buf.append(String(tmp, 0, n, Charsets.UTF_8))
-            var nl = buf.indexOf("\n")
-            while (nl >= 0) { out.add(buf.substring(0, nl).trim()); buf.delete(0, nl + 1); nl = buf.indexOf("\n") }
+            // байты копятся до конца строки: буква UTF-8 (имя сети по-русски) может разрезаться между пакетами USB
+            for (i in 0 until n) {
+                if (tmp[i] == '\n'.code.toByte()) {
+                    out.add(String(buf.toByteArray(), Charsets.UTF_8).removeSuffix("\r").trimStart())
+                    buf.reset()
+                } else buf.write(tmp[i].toInt())
+            }
         }
         return out
     }

@@ -18,7 +18,7 @@ class SurveyControl:
     def __init__(self, keys, ingest, pusher):
         self.keys, self.ingest, self.pusher = keys, ingest, pusher
         self.reports: dict[str, dict] = {}
-        self._seq = int(time.time() * 1000) & 0x7FFFFFFF
+        self._seq = int(time.time())  # секунды unix: после перезапуска сервера больше прежних, u32 до 2106
 
     def on_packet(self, p: Packet, recv_t: float) -> None:
         if p.type == TYPE_SURVEY and p.survey is not None:

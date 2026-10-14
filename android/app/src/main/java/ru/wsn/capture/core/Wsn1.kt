@@ -232,7 +232,7 @@ object Wsn1 {
     }
 
     fun linksArgs(links: List<Pair<String, String>>): ByteArray {
-        if (links.size > 9) throw ProtocolError("too many links")
+        if (links.size > 8) throw ProtocolError("too many links")
         val out = java.io.ByteArrayOutputStream()
         out.write(links.size)
         for ((mac, ip) in links) { out.write(macBytes(mac)); out.write(ipBytes(ip)) }

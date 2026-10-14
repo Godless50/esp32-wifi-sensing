@@ -475,6 +475,6 @@ def survey_args(seconds: int = 60, max_links: int = 6, exclude: list[str] | tupl
 
 def links_args(links: list[tuple[str, str]] | tuple[tuple[str, str], ...]) -> bytes:
     """Arguments of CMD_LINKS: (transmitter MAC, IPv4 to ping) of every device link the board keeps."""
-    if len(links) > 9:
+    if len(links) > 8:
         raise ProtocolError("too many links")
     return bytes([len(links)]) + b"".join(_mac_bytes(m) + _ip_bytes(ip) for m, ip in links)

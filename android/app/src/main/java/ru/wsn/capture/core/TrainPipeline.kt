@@ -37,6 +37,8 @@ object TrainPipeline {
     const val QUIET_MIN = 30
     const val DEDUPE_M = 0.25
     const val TRAJ_MIN_DT = 0.2
+    const val MOVED_M = 0.5          // телефон сдвинули: человек вернулся
+    const val RETURN_MAX_S = 300.0   // после шага «выйдите» ждём, что телефон возьмут, не дольше этого
     /** Rooms are shown when the held-out balanced room accuracy reaches this and beats chance clearly. */
     const val ROOMS_MIN_ACC = 0.6
     const val ROOMS_OVER_CHANCE = 0.2
@@ -174,13 +176,24 @@ object TrainPipeline {
         val k = rooms.size + 1; val e = rooms.size
         val z = Array(ends.size) { DoubleArray(k) }; val m = DoubleArray(ends.size) { -1.0 }
         val steps = s.events.filter { it.optString("kind") == "step" && it.has("t") }.sortedBy { it.getDouble("t") }
-        val emptyIv = steps.mapIndexedNotNull { i, st ->
-            if (st.optString("activity") != "empty") null
-            else st.getDouble("t") + EMPTY_GRACE_S to (if (i + 1 < steps.size) steps[i + 1].getDouble("t") else s.t1)
-        }
         val tr = s.traj
+        // Телефон-центр на шагах «выйдите» лежит дома. Человек уходит и возвращается не точно по шагу (сигнала за
+        // дверью не слышно): пока он уходит (EMPTY_GRACE_S) и пока после шага телефон не взяли в руки — метки нет;
+        // «никого» — от конца ухода до конца шага или до момента, когда телефон сдвинули (вернулся раньше).
+        val emptyIv = ArrayList<Pair<Double, Double>>(); val unknownIv = ArrayList<Pair<Double, Double>>()
+        steps.forEachIndexed { k, st ->
+            if (st.optString("activity") != "empty") return@forEachIndexed
+            val a = st.getDouble("t"); val b = if (k + 1 < steps.size) steps[k + 1].getDouble("t") else s.t1
+            unknownIv += a to a + EMPTY_GRACE_S
+            val rest = posNear(tr, a + EMPTY_GRACE_S)
+            val moved = if (rest == null) null else movedAfter(tr, rest, a + EMPTY_GRACE_S)
+            val end = if (moved != null && moved < b) moved else b
+            if (end > a + EMPTY_GRACE_S) emptyIv += a + EMPTY_GRACE_S to end
+            if (moved == null || moved > b) unknownIv += b to minOf(moved ?: (b + RETURN_MAX_S), b + RETURN_MAX_S)
+        }
         for (i in ends.indices) {
             val te = ends[i]
+            if (unknownIv.any { (a, b) -> te > a && te - WIN_S < b }) continue
             if (emptyIv.any { (a, b) -> a <= te - WIN_S && te <= b }) { z[i][e] = 1.0; m[i] = 0.0; continue }
             if (tr.isEmpty()) continue
             val tp = te - POS_LAG_S
@@ -198,6 +211,13 @@ object TrainPipeline {
         }
         return z to m
     }
+
+    private fun posNear(tr: Array<DoubleArray>, t: Double): DoubleArray? =
+        tr.minByOrNull { abs(it[0] - t) }?.let { doubleArrayOf(it[1], it[2]) }
+
+    /** First time after t0 when the phone is more than MOVED_M from where it lay: somebody picked it up. */
+    private fun movedAfter(tr: Array<DoubleArray>, rest: DoubleArray, t0: Double): Double? =
+        tr.firstOrNull { it[0] > t0 && hypot(it[1] - rest[0], it[2] - rest[1]) > MOVED_M }?.get(0)
 
     fun stats(s: Session, links: List<String>, ends: DoubleArray): Array<Array<DoubleArray?>> =
         Array(ends.size) { i -> Array(links.size) { j ->

@@ -7,7 +7,9 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- connectedDevice: центр держит связь с платами по Wi-Fi круглосуточно (у dataSync лимит 6 ч в сутки и
+         запрет запуска после перезагрузки на Android 15) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- имя сети Wi-Fi, к которой подключён телефон (подсказка в настройке платы) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -48,6 +50,8 @@
         <activity
             android:name=".SetupActivity"
             android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|locale|layoutDirection|keyboard|keyboardHidden|density|fontScale"
             android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -63,7 +67,7 @@
         <service
             android:name=".hub.HubService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="connectedDevice" />
         <receiver
             android:name=".hub.BootReceiver"
             android:exported="true">

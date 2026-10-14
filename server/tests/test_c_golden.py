@@ -134,6 +134,6 @@ def test_hub_cmd_bounds():
     with pytest.raises(ProtocolError):
         survey_args(5)
     with pytest.raises(ProtocolError):
-        links_args([("d8:d6:68:b3:4c:23", "192.168.4.2")] * 10)
+        links_args([("d8:d6:68:b3:4c:23", "192.168.4.2")] * 9)
     with pytest.raises(ProtocolError):
         encode_hub(MAC, 1, KEY, "192.168.4.300", 5005)

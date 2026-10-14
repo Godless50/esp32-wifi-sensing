@@ -57,11 +57,22 @@ class SetupActivity : AppCompatActivity() {
     private var surveyStarted = 0L
     private val prefs by lazy { getSharedPreferences("wsn-setup", MODE_PRIVATE) }
 
-    companion object { private const val USB_PERMISSION = "ru.wsn.capture.USB_PERMISSION" }
+    companion object {
+        private const val USB_PERMISSION = "ru.wsn.capture.USB_PERMISSION"
+        /** A flash is running (it outlives a recreated activity: the board re-enumerates and the phone may offer to
+         *  open the app again). A second one must not start on the same USB device. */
+        private val flashing = java.util.concurrent.atomic.AtomicBoolean(false)
+        @Volatile private var flashText = ""
+        @Volatile private var flashProgress = 0
+        @Volatile private var flashResult: String? = null   // MAC of the board when the last flash finished
+        @Volatile private var flashError: String? = null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         HubService.start(this)
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 8)  // значок работы центра
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(44, 72, 44, 44) }
         title = TextView(this).apply { textSize = 24f; setTextColor(Color.WHITE) }
         body = TextView(this).apply { textSize = 16f; setTextColor(Color.rgb(209, 213, 219)); setPadding(0, 28, 0, 28) }
@@ -71,12 +82,17 @@ class SetupActivity : AppCompatActivity() {
         listOf(title, body, progress, form, buttons).forEach { col.addView(it) }
         setContentView(ScrollView(this).apply { setBackgroundColor(Color.rgb(11, 13, 17)); addView(col) })
         page = try { Page.valueOf(prefs.getString("page", "INTRO")!!) } catch (e: Exception) { Page.INTRO }
-        if (page == Page.CABLE || page == Page.TRAIN) page = if (page == Page.TRAIN) Page.WALK else Page.INTRO
+        if (page == Page.TRAIN && hub()?.train?.running != true) page = Page.WALK
+        if (page == Page.CABLE && flashing.get()) busy = true   // прошивка идёт в другом экземпляре экрана
         show()
         main.post(object : Runnable { override fun run() { refresh(); main.postDelayed(this, 1000) } })
     }
 
     override fun onResume() { super.onResume(); if (page == Page.WALK) show() }
+
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent) }  // плата переподключилась: экран тот же
+
+    override fun onDestroy() { main.removeCallbacksAndMessages(null); super.onDestroy() }
 
     private fun go(p: Page) { page = p; prefs.edit().putString("page", p.name).apply(); show() }
 
@@ -164,6 +180,13 @@ class SetupActivity : AppCompatActivity() {
     private fun refresh() {
         val h = hub() ?: return
         when (page) {
+            Page.CABLE -> if (busy) {
+                progress.visibility = android.view.View.VISIBLE
+                progress.progress = flashProgress; body.text = flashText
+                flashError?.let { busy = false; flashError = null; progress.visibility = android.view.View.GONE
+                    body.text = "Не получилось: $it\n\nПроверьте кабель (нужен кабель с данными) и попробуйте ещё раз." }
+                flashResult?.let { lastBoard = it; flashResult = null; busy = false; go(Page.PLACE) }
+            }
             Page.PLACE -> {
                 val mac = lastBoard
                 if (mac != null && h.boards().any { it.mac == mac }) { body.text = "Плата на связи."; main.postDelayed({ go(Page.MORE) }, 800) }
@@ -237,57 +260,57 @@ class SetupActivity : AppCompatActivity() {
         return s.removeSurrounding("\"").takeIf { it.isNotEmpty() && it != "<unknown ssid>" }
     }
 
-    private fun usb() = getSystemService(Context.USB_SERVICE) as UsbManager
-
     /** Open the board's USB port, asking for permission if needed (the board re-enumerates after flashing). */
-    private fun openPort(): SerialPort {
+    private fun openPort(ctx: Context): SerialPort {
+        val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
         val end = System.currentTimeMillis() + 20000
         while (System.currentTimeMillis() < end) {
-            val dev = usb().deviceList.values.firstOrNull { UsbSerialPort.matches(it) }
+            val dev = usb.deviceList.values.firstOrNull { UsbSerialPort.matches(it) }
             if (dev == null) { Thread.sleep(300); continue }
-            if (!usb().hasPermission(dev) && !askPermission(dev)) throw EspLoader.EspError("нет разрешения на USB")
-            return UsbSerialPort.open(usb(), dev)
+            if (!usb.hasPermission(dev) && !askPermission(ctx, usb, dev)) throw EspLoader.EspError("нет разрешения на USB")
+            return UsbSerialPort.open(usb, dev)
         }
         throw EspLoader.EspError("плата не подключена (нужен кабель с данными и OTG)")
     }
 
-    private fun askPermission(dev: UsbDevice): Boolean {
+    private fun askPermission(ctx: Context, usb: UsbManager, dev: UsbDevice): Boolean {
         val latch = CountDownLatch(1)
         var granted = false
         val rx = object : BroadcastReceiver() {
             override fun onReceive(c: Context, i: Intent) { granted = i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false); latch.countDown() }
         }
         val filter = IntentFilter(USB_PERMISSION)
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(rx, filter, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(rx, filter)
+        if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(rx, filter, Context.RECEIVER_NOT_EXPORTED) else ctx.registerReceiver(rx, filter)
         val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
-        usb().requestPermission(dev, PendingIntent.getBroadcast(this, 0, Intent(USB_PERMISSION).setPackage(packageName), flags))
+        usb.requestPermission(dev, PendingIntent.getBroadcast(ctx, 0, Intent(USB_PERMISSION).setPackage(ctx.packageName), flags))
         latch.await(60, TimeUnit.SECONDS)
-        try { unregisterReceiver(rx) } catch (_: Exception) {}
+        try { ctx.unregisterReceiver(rx) } catch (_: Exception) {}
         return granted
     }
 
     private fun flash(ssid: String, password: String) {
         val h = hub() ?: run { body.text = "Центр запускается, подождите секунду."; return }
         val host = h.localIp() ?: run { body.text = "Телефон не подключён к Wi-Fi. Подключите его к той же сети."; return }
+        if (!flashing.compareAndSet(false, true)) { busy = true; return }
         busy = true
+        flashText = "Связь с платой…"; flashProgress = 0; flashResult = null; flashError = null
         progress.visibility = android.view.View.VISIBLE; progress.progress = 0
         val key = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
         val images = listOf("main", "lite").associateWith { assets.open("firmware/wsn-$it.bin").use { s -> s.readBytes() } }
+        val app = applicationContext
         thread {
             try {
-                ui("Связь с платой…")
-                val r = OtgProvision(::openPort, images) { ui(it) }
-                    .run(key, OtgProvision.Settings(ssid, password, "", host, HubService.PORT)) { p ->
-                        main.post { progress.progress = p; body.text = "Прошивка: $p%" }
-                    }
                 val n = h.knownBoards().size + 1
-                h.addKey(r.mac, key, "Плата $n")
-                lastBoard = r.mac.lowercase()
-                main.post { busy = false; go(Page.PLACE) }
+                val r = OtgProvision({ openPort(app) }, images) { flashText = it }
+                    .run(key, OtgProvision.Settings(ssid, password, "", host, HubService.PORT),
+                        onProgress = { p -> flashProgress = p; flashText = "Прошивка: $p%" },
+                        beforeProvision = { mac -> h.addKey(mac, key, "Плата $n") })  // ключ — в телефон раньше, чем в плату
                 h.announce()
+                flashResult = r.mac.lowercase()
             } catch (e: Exception) {
-                main.post { busy = false; progress.visibility = android.view.View.GONE
-                    body.text = "Не получилось: ${e.message}\n\nПроверьте кабель (нужен кабель с данными) и попробуйте ещё раз." }
+                flashError = e.message ?: e.javaClass.simpleName
+            } finally {
+                flashing.set(false)
             }
         }
     }

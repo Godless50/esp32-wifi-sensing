@@ -1,22 +1,22 @@
 {
- "git": "e45d1c4",
- "built": "2026-10-14 20:47:30",
+ "git": "b99a016-dirty",
+ "built": "2026-10-15 01:48:50",
  "images": {
   "main": {
    "file": "wsn-main.bin",
    "flash": "16MB",
    "psram": true,
-   "bytes": 1081088,
-   "sha256": "d7ef17e59f1c1149b7c44da396cfb1be3b5710d414f70a1f86c2b1ffeca96840",
-   "fw_id": "80971bc9"
+   "bytes": 1096832,
+   "sha256": "fef5ff9c5be190bac2fcd6940b84c0dd0beac0742a8b16684b23def932ec2805",
+   "fw_id": "80e70cfb"
   },
   "lite": {
    "file": "wsn-lite.bin",
    "flash": "8MB",
    "psram": false,
-   "bytes": 1070224,
-   "sha256": "7f88dbbb5e0348b1931b264b60fffc13a5f46ec1355929120b311323d3e84a58",
-   "fw_id": "80bb5fcf"
+   "bytes": 1086000,
+   "sha256": "652c760fde7bd15d745f2fce1bc55511b62783c6b0ce9d99ebc3b6defbeba1e5",
+   "fw_id": "8019f57e"
   }
  }
 }

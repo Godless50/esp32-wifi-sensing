@@ -56,15 +56,16 @@ class HubService : Service() {
         private set
     lateinit var local: LocalCapture
         private set
-    private var socket: DatagramSocket? = null
+    @Volatile private var socket: DatagramSocket? = null
     private var multicast: WifiManager.MulticastLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var wake: PowerManager.WakeLock? = null
     private val pool = Executors.newScheduledThreadPool(3)
     private val sinkLock = Any()
     private var sink: OutputStream? = null
-    private var hubSeq = System.currentTimeMillis() / 1000
-    private var cmdSeq = System.currentTimeMillis() and 0x7FFFFFFF
+    // счётчики в секундах unix (u32 хватит до 2106): после перезапуска центра они всё равно больше прежних
+    private val hubSeq = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis() / 1000)
+    private val cmdSeq = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis() / 1000)
     private val seen = ConcurrentHashMap<String, Triple<Double, Long, InetSocketAddress>>()  // mac -> (t, boot, addr)
     val surveys = ConcurrentHashMap<String, Wsn1.Survey>()
     @Volatile var verdict: ZoneModel.Verdict? = null
@@ -81,28 +82,39 @@ class HubService : Service() {
     private val keysFile: File get() = File(filesDir, "device_keys.json")
     @Volatile private var keyCache: Map<String, ByteArray> = emptyMap()
 
+    @Volatile private var names: Map<String, String> = emptyMap()
+
+    private fun keysJson(): JSONObject = try {
+        if (keysFile.exists()) JSONObject(keysFile.readText()) else JSONObject()
+    } catch (e: Exception) { Log.w(TAG, "keys file unreadable", e); JSONObject() }
+
+    /** Keys entry by entry: one broken entry does not take the others with it. */
     fun keys(): Map<String, ByteArray> {
-        if (!keysFile.exists()) return emptyMap()
-        return try {
-            val j = JSONObject(keysFile.readText())
-            j.keys().asSequence().associateWith { k -> hex(j.getJSONObject(k).optString("key", "")) }.filterValues { it.size == 32 }
-        } catch (e: Exception) { Log.w(TAG, "keys unreadable", e); emptyMap() }
+        val j = keysJson()
+        val out = HashMap<String, ByteArray>(); val nm = HashMap<String, String>()
+        for (k in j.keys()) try {
+            val e = j.getJSONObject(k); val key = hex(e.optString("key", ""))
+            if (key.size == 32) { out[k] = key; nm[k] = e.optString("name", k) }
+        } catch (e: Exception) { Log.w(TAG, "key entry $k unreadable") }
+        names = nm
+        return out
     }
 
+    /** Atomic: temp file, sync, rename (a half-written file would lose the keys of every board). */
     @Synchronized fun addKey(mac: String, keyHex: String, name: String) {
-        val j = if (keysFile.exists()) JSONObject(keysFile.readText()) else JSONObject()
+        val j = keysJson()
         j.put(mac.lowercase(), JSONObject().put("key", keyHex).put("name", name))
-        keysFile.writeText(j.toString())
+        val tmp = File(filesDir, "device_keys.json.tmp")
+        java.io.FileOutputStream(tmp).use { it.write(j.toString().toByteArray()); it.fd.sync() }
+        if (!tmp.renameTo(keysFile)) throw java.io.IOException("cannot store the board key")
         keyCache = keys()
     }
 
     fun knownBoards(): List<String> = keyCache.keys.sorted()
 
-    fun boardName(mac: String): String = try {
-        JSONObject(keysFile.readText()).optJSONObject(mac)?.optString("name") ?: mac
-    } catch (e: Exception) { mac }
+    fun boardName(mac: String): String = names[mac] ?: mac
 
-    private fun hex(s: String) = if (s.length % 2 != 0) ByteArray(0) else
+    private fun hex(s: String) = if (s.length % 2 != 0 || !s.all { it in "0123456789abcdefABCDEF" }) ByteArray(0) else
         ByteArray(s.length / 2) { ((s[it * 2].digitToInt(16) shl 4) or s[it * 2 + 1].digitToInt(16)).toByte() }
 
     // ---------------- lifecycle ----------------
@@ -134,7 +146,17 @@ class HubService : Service() {
     private fun loadModel(): ZoneModel? =
         if (modelFile.exists()) try { ZoneModel.fromJson(modelFile.readText()) } catch (e: Exception) { null } else null
 
-    fun modelMeta(): JSONObject? = if (modelFile.exists()) try { JSONObject(modelFile.readText()) } catch (e: Exception) { null } else null
+    @Volatile private var metaCache: Pair<Long, JSONObject?>? = null
+
+    /** model.json without the weights (plan, rooms_ok, quiet, metrics); re-read only when the file changes. */
+    fun modelMeta(): JSONObject? {
+        if (!modelFile.exists()) return null
+        val m = modelFile.lastModified()
+        metaCache?.let { if (it.first == m) return it.second }
+        val j = try { JSONObject(modelFile.readText()).apply { remove("nets"); remove("mu"); remove("sd") } } catch (e: Exception) { null }
+        metaCache = m to j
+        return j
+    }
 
     private fun quietFromModel(): Map<String, DoubleArray> {
         val q = modelMeta()?.optJSONObject("quiet") ?: return emptyMap()
@@ -143,28 +165,42 @@ class HubService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (running.getAndSet(true)) return START_STICKY
-        startForeground(1, notification())
+        if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        else startForeground(1, notification())
         acquireLocks()
         pool.execute { receiveLoop() }
         pool.scheduleAtFixedRate({ tickOnce() }, 1, 1, TimeUnit.SECONDS)
         pool.scheduleAtFixedRate({ announce() }, 2, 15, TimeUnit.SECONDS)
+        pool.scheduleAtFixedRate({ synchronized(sinkLock) { try { sink?.flush() } catch (_: Exception) {} } }, 5, 5, TimeUnit.SECONDS)
         return START_STICKY
     }
 
+    /** Receive forever: a failed bind or a socket error is retried (the service must not go deaf). */
     private fun receiveLoop() {
-        try {
-            val s = DatagramSocket(null).apply { reuseAddress = true; broadcast = true; bind(InetSocketAddress(PORT)) }
-            socket = s
-            val buf = ByteArray(2048)
-            while (running.get()) {
-                val pkt = DatagramPacket(buf, buf.size)
-                s.receive(pkt)
-                val t = now()
-                val p = engine.onDatagram(pkt.data.copyOf(pkt.length), t) ?: continue
-                seen[p.deviceId] = Triple(t, p.bootId, InetSocketAddress(pkt.address, pkt.port))
-                if (p.type == Wsn1.TYPE_SURVEY) p.survey?.let { surveys[p.deviceId] = it }
+        var backoff = 1000L
+        while (running.get()) {
+            try {
+                val s = DatagramSocket(null).apply { reuseAddress = true; broadcast = true; bind(InetSocketAddress(PORT)) }
+                socket = s
+                backoff = 1000L
+                val buf = ByteArray(2048)
+                while (running.get()) {
+                    val pkt = DatagramPacket(buf, buf.size)
+                    s.receive(pkt)
+                    val t = now()
+                    val p = engine.onDatagram(pkt.data.copyOf(pkt.length), t) ?: continue  // чужое, неподписанное, повтор
+                    seen[p.deviceId] = Triple(t, p.bootId, InetSocketAddress(pkt.address, pkt.port))
+                    if (p.type == Wsn1.TYPE_SURVEY) p.survey?.let { surveys[p.deviceId] = it }
+                }
+            } catch (e: Exception) {
+                if (!running.get()) return
+                Log.e(TAG, "receive loop, retry in ${backoff / 1000} s", e)
+                try { socket?.close() } catch (_: Exception) {}
+                socket = null
+                try { Thread.sleep(backoff) } catch (_: InterruptedException) { return }
+                backoff = minOf(backoff * 2, 30_000L)
             }
-        } catch (e: Exception) { if (running.get()) Log.e(TAG, "receive loop", e) }
+        }
     }
 
     private fun tickOnce() {
@@ -182,10 +218,10 @@ class HubService : Service() {
     fun announce() {
         val s = socket ?: return
         val ip = localIp() ?: return
-        hubSeq++
+        val seq = hubSeq.incrementAndGet()
         for ((mac, key) in keyCache) {
             try {
-                val pkt = Wsn1.encodeHub(mac, hubSeq, key, ip, PORT)
+                val pkt = Wsn1.encodeHub(mac, seq, key, ip, PORT)
                 s.send(DatagramPacket(pkt, pkt.size, InetAddress.getByName("255.255.255.255"), PORT))
                 seen[mac]?.let { s.send(DatagramPacket(pkt, pkt.size, it.third)) }  // и напрямую: широковещание теряется
             } catch (e: Exception) { Log.w(TAG, "announce $mac", e) }
@@ -196,8 +232,7 @@ class HubService : Service() {
         val s = socket ?: return false
         val b = seen[mac] ?: return false
         val key = keyCache[mac] ?: return false
-        cmdSeq++
-        val pkt = Wsn1.encodeCmd(mac, b.second, cmdSeq, key, cmd, args)
+        val pkt = Wsn1.encodeCmd(mac, b.second, cmdSeq.incrementAndGet(), key, cmd, args)
         pool.execute { try { repeat(3) { s.send(DatagramPacket(pkt, pkt.size, b.third)); Thread.sleep(50) } } catch (_: Exception) {} }
         return true
     }
@@ -222,7 +257,9 @@ class HubService : Service() {
     /** Train on the newest finished walk, in the background; [train] follows the progress. */
     fun trainNewest() {
         if (train.running) return
-        val dir = sessions().firstOrNull { JSONObject(File(it, "meta.json").readText()).has("t1") }
+        // законченная запись или прерванная (процесс убили посреди обхода: конец — по последней позе)
+        val open = synchronized(local) { local.activeDir }
+        val dir = sessions().firstOrNull { it != open }
         if (dir == null) { train = TrainState(false, "", 0.0, "нет записанного обхода", false); return }
         train = TrainState(true, "чтение записи", 0.0, "")
         pool.execute {

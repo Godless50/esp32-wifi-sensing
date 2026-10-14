@@ -30,12 +30,29 @@ class HubEngine(
     @Volatile var lastSurvey: Wsn1.Survey? = null
     private var emptySince: Double? = null
 
-    fun setQuiet(levels: Map<String, DoubleArray>) { quiet.clear(); quiet.putAll(levels) }
+    private val lock = Any()  // приём (поток сокета), ответ раз в секунду и новая модель — из разных потоков
+    private val fresh = HashMap<String, Pair<Long, Long>>()  // плата -> (boot_id, seq) последнего принятого пакета
+
+    fun setQuiet(levels: Map<String, DoubleArray>) = synchronized(lock) { quiet.clear(); quiet.putAll(levels) }
+
+    /** A packet counts only if it is newer than the last one of that board: boot_id grows on every reboot, seq
+     *  within a boot. Signed but replayed datagrams (recorded on the LAN and sent again) are dropped. */
+    private fun isFresh(p: Wsn1.Packet): Boolean {
+        val last = fresh[p.deviceId]
+        if (last != null && (p.bootId < last.first || (p.bootId == last.first && p.seq <= last.second))) return false
+        fresh[p.deviceId] = p.bootId to p.seq
+        return true
+    }
 
     /** Verify (with the board's key) and ingest one datagram captured at `recvT` (seconds, the phone's clock). */
     fun onDatagram(buf: ByteArray, recvT: Double): Wsn1.Packet? {
         val dev = try { Wsn1.peekDeviceId(buf) } catch (e: Exception) { return null }
         val p = try { Wsn1.parse(buf, keyFor(dev)) } catch (e: Exception) { return null }
+        synchronized(lock) { return ingest(p, buf, recvT) }
+    }
+
+    private fun ingest(p: Wsn1.Packet, buf: ByteArray, recvT: Double): Wsn1.Packet? {
+        if (!isFresh(p)) return null
         when (p.type) {
             Wsn1.TYPE_CSI, Wsn1.TYPE_CSI_SRC -> {
                 rawSink?.invoke(buf, recvT)
@@ -62,7 +79,9 @@ class HubEngine(
     }
 
     /** Verdict for the window ending at `now - LAG_S`, or null if no model is loaded. */
-    fun tick(now: Double): ZoneModel.Verdict? {
+    fun tick(now: Double): ZoneModel.Verdict? = synchronized(lock) { tickLocked(now) }
+
+    private fun tickLocked(now: Double): ZoneModel.Verdict? {
         val m = model ?: return null
         val t1 = now - LAG_S
         val x = Array(1) { Array(m.links.size) { j ->
@@ -84,6 +103,7 @@ class HubEngine(
         for (i in lvl.indices) lvl[i] = exp((1 - ADAPT_RATE) * ln(lvl[i] + EPS) + ADAPT_RATE * ln(st[i] + EPS)) - EPS
     }
 
-    fun liveLinks(now: Double, withinS: Double = 10.0): List<String> =
+    fun liveLinks(now: Double, withinS: Double = 10.0): List<String> = synchronized(lock) {
         buffers.filter { it.value.isNotEmpty() && it.value.peekLast().first >= now - withinS }.keys.sorted()
+    }
 }

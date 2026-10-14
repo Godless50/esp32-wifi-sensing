@@ -87,15 +87,25 @@ float uplink_csi_hz(void) { return s_csi_hz; }
 
 #define LISTEN_PORT 5005 /* центр (телефон) рассылает свой адрес широковещательно на этот порт */
 
-static int open_socket(struct sockaddr_in *dst)
+/* Address of the hub from the stored host; false (dst address 0) when it does not resolve. */
+static bool resolve_dst(struct sockaddr_in *dst)
 {
     struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_DGRAM};
     struct addrinfo *res = NULL;
-    if (getaddrinfo(s_cfg.host, NULL, &hints, &res) != 0 || !res) return -1;
+    memset(dst, 0, sizeof(*dst));
+    if (getaddrinfo(s_cfg.host, NULL, &hints, &res) != 0 || !res) return false;
     *dst = *(struct sockaddr_in *)res->ai_addr;
     dst->sin_port = htons(s_cfg.port);
     freeaddrinfo(res);
     survey_set_hub(dst->sin_addr.s_addr);
+    return true;
+}
+
+/* The socket is opened and bound to 5005 even when the stored host does not resolve (an old computer server):
+ * the board must still hear the phone's announcement to move to it. */
+static int open_socket(struct sockaddr_in *dst)
+{
+    if (!resolve_dst(dst)) ESP_LOGW(TAG, "cannot resolve %s: waiting for a hub announcement", s_cfg.host);
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (sock < 0) return sock;
     int one = 1;
@@ -159,7 +169,7 @@ static void on_cmd(const wsn_cmd_t *c)
 
 static void send_pkt(int sock, const struct sockaddr_in *dst, const uint8_t *buf, int len)
 {
-    if (sock < 0 || len <= 0) return;
+    if (sock < 0 || len <= 0 || dst->sin_addr.s_addr == 0) return;
     sendto(sock, buf, len, 0, (const struct sockaddr *)dst, sizeof(*dst)); /* best effort */
 }
 
@@ -189,10 +199,15 @@ static void uplink_task(void *arg)
         esp_task_wdt_reset();
         if (sock < 0 && wifi_mgr_state() == WIFI_ST_CONNECTED && esp_timer_get_time() >= next_resolve) {
             sock = open_socket(&dst);
-            if (sock < 0) { /* DNS/host problem: retry with a pause, never spin */
+            if (sock >= 0 && dst.sin_addr.s_addr == 0) next_resolve = esp_timer_get_time() + RESOLVE_RETRY_US;
+            if (sock < 0) { /* no socket: retry with a pause, never spin */
                 ESP_LOGW(TAG, "cannot resolve/open %s, retry in 5 s", s_cfg.host);
                 next_resolve = esp_timer_get_time() + RESOLVE_RETRY_US;
             }
+        }
+
+        if (sock >= 0 && dst.sin_addr.s_addr == 0 && esp_timer_get_time() >= next_resolve) {
+            if (!resolve_dst(&dst)) next_resolve = esp_timer_get_time() + RESOLVE_RETRY_US;
         }
 
         int8_t *slot = data[n];
