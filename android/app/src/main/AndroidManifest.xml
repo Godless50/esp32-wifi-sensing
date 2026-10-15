@@ -48,7 +48,7 @@
             android:exported="false"
             android:screenOrientation="portrait" />
         <activity
-            android:name=".SetupActivity"
+            android:name=".UiActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|locale|layoutDirection|keyboard|keyboardHidden|density|fontScale"
@@ -60,10 +60,6 @@
             <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/usb_device_filter" />
         </activity>
-        <activity
-            android:name=".HubMapActivity"
-            android:exported="false"
-            android:screenOrientation="portrait" />
         <service
             android:name=".hub.HubService"
             android:exported="false"

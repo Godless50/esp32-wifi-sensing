@@ -217,22 +217,59 @@ class HubService : Service() {
         try { diary() } catch (e: Exception) { Log.w(TAG, "events", e) }
     }
 
-    /** One state per second into the diary: no board heard for a minute is «нет связи», not «никого». */
+    /** One state per second into the diary: no board heard for a minute is «нет связи», not «никого»;
+     *  the phone away from the home Wi-Fi is «нет данных», not «нет связи». */
     private fun diary() {
         if (keyCache.isEmpty() || modelMeta() == null) return     // до конца настройки дневник не ведём
         val t = now()
         val v = verdict
         val e = when {
+            isAway() -> events.feed(t, EventLog.State.NODATA)
             boards(offlineAfterS).isEmpty() && lastHeard() == null && t - startedAt < offlineAfterS -> null
             boards(offlineAfterS).isEmpty() -> events.feed(t, EventLog.State.OFFLINE)
             v == null -> null
             v.emptyP >= 0.5 -> events.feed(t, EventLog.State.EMPTY)
-            else -> events.feed(t, EventLog.State.PRESENT, if (modelMeta()?.optBoolean("rooms_ok") == true) v.zone else null)
+            else -> events.feed(t, if (v.movingP >= 0.5) EventLog.State.MOVING else EventLog.State.QUIET,
+                if (modelMeta()?.optBoolean("rooms_ok") == true) v.zone else null)
         }
         if (e != null) {
             val tmp = File(filesDir, "events.json.tmp")
             tmp.writeText(events.toJson()); tmp.renameTo(eventsFile)
         }
+    }
+
+    // ---------------- home network ----------------
+    private val prefs get() = getSharedPreferences("wsn-hub", Context.MODE_PRIVATE)
+
+    /** The Wi-Fi the boards were set up on (saved after a successful cable setup). */
+    var homeSsid: String?
+        get() = prefs.getString("home_ssid", null)
+        set(v) { prefs.edit().putString("home_ssid", v).apply() }
+
+    @Suppress("DEPRECATION")
+    fun currentSsid(): String? {
+        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val s = wifi.connectionInfo?.ssid ?: return null
+        return s.removeSurrounding("\"").takeIf { it.isNotEmpty() && it != "<unknown ssid>" }
+    }
+
+    /** The phone is not on the home network: no address, or (when the name is readable) another network. */
+    fun isAway(): Boolean {
+        if (localIp() == null) return true
+        val home = homeSsid ?: return false
+        val cur = currentSsid() ?: return false
+        return cur != home
+    }
+
+    /** Forget a board: its key goes, so its packets are no longer accepted. */
+    @Synchronized fun removeKey(mac: String) {
+        val j = keysJson()
+        j.remove(mac.lowercase())
+        val tmp = File(filesDir, "device_keys.json.tmp")
+        java.io.FileOutputStream(tmp).use { it.write(j.toString().toByteArray()); it.fd.sync() }
+        if (!tmp.renameTo(keysFile)) throw java.io.IOException("cannot store the board keys")
+        keyCache = keys()
+        seen.remove(mac.lowercase())
     }
 
     /** When any board was last heard (unix seconds), or null if never since the start. */
@@ -324,12 +361,12 @@ class HubService : Service() {
     private fun notification(): Notification {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, "Штаб", NotificationManager.IMPORTANCE_LOW))
+            nm.createNotificationChannel(NotificationChannel(CHANNEL, "Жучок", NotificationManager.IMPORTANCE_LOW))
         }
         @Suppress("DEPRECATION")
         val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
-        return b.setContentTitle("Штаб на посту")
-            .setContentText("Жучок замечает, есть ли кто-то дома. Не закрывайте")
+        return b.setContentTitle("Жучок на посту")
+            .setContentText("Жучок слушает дом")
             .setSmallIcon(android.R.drawable.ic_menu_compass).setOngoing(true).build()
     }
 

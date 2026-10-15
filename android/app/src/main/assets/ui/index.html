@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<title>Жучок</title>
+<style>
+@font-face{font-family:Nunito;src:url(fonts/Nunito.ttf) format('truetype');font-weight:200 1000;font-style:normal;font-display:block}
+@font-face{font-family:Unbounded;src:url(fonts/Unbounded.ttf) format('truetype');font-weight:200 900;font-style:normal;font-display:block}
+:root{--top:max(24px,env(safe-area-inset-top,0px))} /* Kotlin может задать точное: documentElement.style.setProperty("--top","32px") */
+html,body{margin:0;height:100%;background:#FFF6E6}
+</style>
+<script>
+  // очередь: Kotlin может вызвать setState раньше, чем загрузится app.js
+  window.app = window.app || { q: [], setState(s) { this.q.push(s); } };
+</script>
+<script type="module" src="app.js"></script>
+</head>
+<body><div id="app"></div></body>
+</html>

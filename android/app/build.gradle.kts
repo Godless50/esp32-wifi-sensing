@@ -52,6 +52,7 @@ dependencies {
     implementation("com.google.ar:core:1.45.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.webkit:webkit:1.12.1")         // интерфейс «Жучка»: локальная страница assets/ui
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")  // сканер QR-кода сопряжения
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

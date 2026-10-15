@@ -51,8 +51,7 @@ class HomeActivity : AppCompatActivity() {
         if (!Server.paired() && !intent.getBooleanExtra(EXTRA_CLASSIC, false)) {
             // обычный человек: без компьютера телефон — штаб; настроен — сразу штаб, иначе настройка
             ru.wsn.capture.hub.HubService.start(this)
-            val ready = java.io.File(filesDir, "model/model.json").exists()
-            startActivity(Intent(this, if (ready) HubMapActivity::class.java else SetupActivity::class.java))
+            startActivity(Intent(this, UiActivity::class.java))
             finish(); return
         }
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 72, 40, 40) }
@@ -64,8 +63,8 @@ class HomeActivity : AppCompatActivity() {
         bCapture = button("Разметка квартиры и запись сценария", true) { startActivity(Intent(this, CaptureActivity::class.java)) }
         bMap = button("Карта", true) { startActivity(Intent(this, MapActivity::class.java)) }
         val bPw = button("Пароль сервера", false) { askPassword(null) }
-        bSetup = button("Настройка без компьютера", true) { startActivity(Intent(this, SetupActivity::class.java)) }
-        bHubMap = button("Карта", true) { startActivity(Intent(this, HubMapActivity::class.java)) }
+        bSetup = button("Настройка без компьютера", true) { startActivity(Intent(this, UiActivity::class.java)) }
+        bHubMap = button("Жучок", true) { startActivity(Intent(this, UiActivity::class.java)) }
         for (b in listOf(bSetup, bHubMap, bCapture, bMap, bPair, bPw)) col.addView(b, LinearLayout.LayoutParams(MATCH_PARENT, 150).apply { setMargins(0, 12, 0, 12) })
         col.addView(TextView(this).apply {
             textSize = 13f; setTextColor(Color.GRAY); setPadding(0, 24, 0, 0)
