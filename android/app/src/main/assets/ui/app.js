@@ -341,7 +341,7 @@ S.home = (st) => {
 </svg>
 <div style="position:absolute;left:50%;bottom:-6px;transform:translateX(-50%)">${bug({ pose: 'listen', size: 128, fx: null })}</div></div>`;
     return { ...base,
-      cv: `${heroCard({ state: 'nodata', zone: '', top: HL.heroTop, height: HL.heroH, art, title: 'Ты не дома', sub: 'Жучок всё записывает.<br>Покажу, когда вернёшься' })}${secHtml()}${scale(daySegs(h))}`,
+      cv: `${heroCard({ state: 'nodata', zone: '', top: HL.heroTop, height: HL.heroH, art, title: 'Ты не дома', sub: 'Вернёшься —<br>снова буду слушать' })}${secHtml()}${scale(daySegs(h))}`,
       flow: `${checklistCard(st)}${evCard}` };
   }
   if (s === 'hark') {
