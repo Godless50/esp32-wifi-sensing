@@ -49,7 +49,7 @@ import kotlin.math.roundToInt
  * the guided scenario -> "Сохранить". Poses (30 Hz) and events go to /ws/capture (CaptureClient).
  */
 class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
-    private enum class Phase { START, DEVICES, ROOMS, SCENARIO, DONE }
+    private enum class Phase { START, OUT1, DEVICES, ROOMS, SCENARIO, DONE }   // OUT1 — «все за дверь» в начале (телефон-центр)
 
     private val main = Handler(Looper.getMainLooper())
     private lateinit var glView: GLSurfaceView
@@ -84,6 +84,16 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var runner: ScenarioRunner? = null
     private val logLines = ArrayDeque<String>()
     private var tone: ToneGenerator? = null
+    // ---- обход для людей (телефон — центр): игрушечная страница поверх камеры вместо панели ----
+    private var hud: WalkHud? = null
+    private var preRunner: ScenarioRunner? = null
+    private var out1Done = false
+    private var naming = false
+    private var exitSheet = false
+    private var toast: String? = null
+    private var toastUntil = 0L
+    private var closing = false      // запись закрыта, экран уходит: ничего не начинать заново
+    private var startedOnce = false  // сам начинаем запись один раз; дальше — только по «Уходим»
 
     private fun nowMs(): Double = SystemClock.elapsedRealtimeNanos() / 1e6
 
@@ -168,7 +178,9 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     override fun onDestroy() {
         super.onDestroy()
         main.removeCallbacksAndMessages(null)  // циклы опроса и сценария не держат закрытый экран
+        if (hubMode && !closing && recording()) { client.flushPoses(); client.event("session_stop") }  // брошенная запись не пишется вечно
         transport?.close()
+        hud?.destroy()
         session?.close()
         session = null
         tone?.release()
@@ -176,7 +188,10 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) log("Без камеры разметка невозможна.", true)
+        if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
+            if (hubMode) { finishWalk(false); return }   // приложение покажет «Без камеры не отмечу углы»
+            log("Без камеры разметка невозможна.", true)
+        }
     }
 
     // ---------------- GL ----------------
@@ -272,6 +287,7 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private fun startRecording() {
         if (client.session != null && !client.owner) { log("Запись уже ведёт другой телефон.", true); return }
         client.event("session_start", JSONObject().put("session_kind", "walk"))
+        if (hubMode) { startedOnce = true; startOut1(); return }
         setPhase(Phase.DEVICES)
         log("Запись идёт. Отметьте каждую плату и точку доступа.")
     }
@@ -332,20 +348,21 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private fun startScenario() {
         if (roomOpen != null) closeRoom()
         if (rooms.isEmpty()) { log("Сначала отметьте хотя бы одну комнату.", true); return }
-        val steps = Scenario.build(rooms, phoneStays = hubMode)
-        runner = ScenarioRunner(steps, onStep = { st, i ->
-            client.event("step", JSONObject().put("name", st.name).put("activity", st.activity)
-                .put("room", st.room ?: JSONObject.NULL).put("duration_s", st.seconds).put("index", i))
-            if (st.activity in POSES) client.event("label", JSONObject().put("pose", st.activity))
-            beep(i > 0)
-            rebuildPanel()
-        }, onDone = { beep(true); setPhase(Phase.DONE) })
+        // телефон-центр: «все за дверь» в начале уже было (OUT1); шаги «за дверь» и следующий за ним ждут человека
+        val steps = if (hubMode) Scenario.build(rooms, phoneStays = true).drop(1) else Scenario.build(rooms)
+        runner = if (hubMode) ScenarioRunner(steps, onStep = { st, i -> sendStep(st, i); beep(false); pushHud() },
+            onDone = { sendBack(); beep(true); setPhase(Phase.DONE) },
+            gate = { st, prev -> st.activity == "empty" || prev?.activity == "empty" },
+            onWait = { st, i -> if (st.activity != "empty") sendBack(); beep(true); pushHud() })
+        else ScenarioRunner(steps, onStep = { st, i -> sendStep(st, i); beep(i > 0); rebuildPanel() },
+            onDone = { beep(true); setPhase(Phase.DONE) })
         setPhase(Phase.SCENARIO)
         runner?.start()
         log("Сценарий: ${steps.size} шагов, ~${(Scenario.totalSeconds(steps) + 59) / 60} мин. Следуйте подсказкам.")
     }
 
     private fun tickScenario() {
+        if (phase == Phase.OUT1) { preRunner?.tick(); pushHud(); return }
         val r = runner ?: return
         if (phase != Phase.SCENARIO) return
         r.tick()
@@ -378,21 +395,23 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     // ---------------- интерфейс ----------------
     private fun log(text: String, err: Boolean = false) {
         main.post {
+            if (err && hubMode) { toast = friendly(text); toastUntil = System.currentTimeMillis() + 3500; pushHud() }
             logLines.addFirst((if (err) "⚠ " else "") + text)
             while (logLines.size > 3) logLines.removeLast()
             if (this::logView.isInitialized) logView.text = logLines.joinToString("\n")
         }
     }
 
-    private fun setPhase(p: Phase) { phase = p; rebuildPanel() }
+    private fun setPhase(p: Phase) { phase = p; rebuildPanel(); pushHud() }
 
     private fun render() {
-        if (!this::status.isInitialized) return
+        if (!this::status.isInitialized || closing) return
         val s = client.session
         val key = s?.optString("id")
         if (key != sessionKey) {
             sessionKey = key
-            if (s != null && client.owner && phase == Phase.START) setPhase(Phase.DEVICES)  // вернулись к своей записи
+            // вернулись к своей записи; телефон-центр её закрывает и начинает обход с начала (старое «за дверь» не годится)
+            if (s != null && client.owner && phase == Phase.START) { if (hubMode) client.event("session_stop") else setPhase(Phase.DEVICES) }
             if (s == null && phase != Phase.START) { runner = null; setPhase(Phase.START) }
         }
         val rec = when {
@@ -409,6 +428,10 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         cross.visibility = if (phase == Phase.ROOMS) View.VISIBLE else View.INVISIBLE
         // список устройств приходит с сервера: панель — только когда он изменился (иначе закрылся бы выпадающий список)
         if (phase == Phase.DEVICES && client.devices.map { it.mac } != shownDevices) rebuildPanel()
+        if (hubMode) {
+            if (!startedOnce && phase == Phase.START && client.online && client.session == null) startRecording()
+            pushHud()
+        }
     }
 
     private fun fmt(sec: Int): String { val t = sec.coerceAtLeast(0); return "%d:%02d".format(t / 60, t % 60) }
@@ -451,6 +474,7 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         panel.removeAllViews()
         stepText = null; stepInfo = null
         when (phase) {
+            Phase.OUT1 -> {}
             Phase.START -> {
                 panel.addView(hint("1. Начните запись. Пока она идёт, в квартире должны быть только вы."))
                 panel.addView(row(btn("Начать запись", 1) { startRecording() }, btn("Закрыть") { finish() }))
@@ -531,6 +555,11 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             orientation = LinearLayout.VERTICAL; setPadding(12, 12, 12, 36); setBackgroundColor(Color.argb(200, 16, 19, 24))
         }
         root.addView(panel, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM))
+        if (hubMode) {
+            for (v in listOf(status, logView, cross, panel)) v.visibility = View.GONE
+            cross.alpha = 0f
+            hud = WalkHud(this) { a, args -> hudAction(a, args) }.also { root.addView(it.view, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)) }
+        }
         setContentView(root)
         rebuildPanel()
         render()
@@ -538,7 +567,191 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        if (hubMode) { hudAction("walkBack", JSONObject()); return }
         if (recording()) askSave() else @Suppress("DEPRECATION") super.onBackPressed()
+    }
+
+    // ================= обход для людей (телефон — центр) =================
+    private fun sendStep(st: Step, i: Int) {
+        client.event("step", JSONObject().put("name", st.name).put("activity", st.activity)
+            .put("room", st.room ?: JSONObject.NULL).put("duration_s", st.seconds).put("index", i))
+        if (st.activity in POSES) client.event("label", JSONObject().put("pose", st.activity))
+    }
+
+    /** «За дверь» закончилось: метка «никого» обучения кончается здесь, дальше — возвращение (без метки). */
+    private fun sendBack() {
+        client.event("step", JSONObject().put("name", "back").put("activity", "back").put("room", JSONObject.NULL)
+            .put("duration_s", 0).put("index", -1))
+    }
+
+    private fun startOut1() {
+        out1Done = false
+        preRunner = ScenarioRunner(listOf(Scenario.leave(1, phoneStays = true)), onStep = { st, i -> sendStep(st, i); pushHud() },
+            onDone = { sendBack(); beep(true); out1Done = true; pushHud() },
+            gate = { st, _ -> st.activity == "empty" })
+        setPhase(Phase.OUT1)
+        preRunner?.start()
+    }
+
+    /** Кто-то остался дома: эта попытка «за дверь» не считается, ждём «Уходим» снова. */
+    private fun outAgain(r: ScenarioRunner) {
+        client.event("step", JSONObject().put("name", "redo").put("activity", "redo").put("room", JSONObject.NULL)
+            .put("duration_s", 0).put("index", -1))
+        r.again()
+    }
+
+    private fun friendly(text: String): String = when {
+        text.startsWith("Нет трекинга") -> "Поводи телефоном"
+        text.startsWith("Пол не найден") -> "Покажи мне пол"
+        text.startsWith("Наведите кружок") -> "Ближе к углу у пола"
+        text.startsWith("Этот угол уже") -> "Тут уже отмечено"
+        text.contains("меньше 3 углов") -> "Нужно хотя бы 3 угла"
+        text.startsWith("Ни одна плата") || text.startsWith("Сервер не видит") -> "Жучок молчит"
+        text.startsWith("Комната не замкнута") -> "Углы не сходятся — эту комнату заново"
+        text.startsWith("ARCore") || text.startsWith("Камера недоступна") -> "Камера не запустилась"
+        text.startsWith("Нет связи") -> "Секунду…"
+        else -> text
+    }
+
+    private fun hudAction(a: String, args: JSONObject) {
+        val r = runner
+        when (a) {
+            "walkGo" -> when (phase) {
+                Phase.START -> if (client.online && client.session == null) { startRecording(); preRunner?.go() }
+                Phase.OUT1 -> if (out1Done) { setPhase(Phase.DEVICES) } else preRunner?.go()
+                Phase.SCENARIO -> r?.go()
+                else -> {}
+            }
+            "walkAgain" -> when (phase) {
+                Phase.OUT1 -> preRunner?.let { outAgain(it) }
+                Phase.SCENARIO -> r?.let { outAgain(it) }
+                else -> {}
+            }
+            "walkBoard" -> {
+                val boards = client.devices.filter { it.role == "board" }
+                boards.firstOrNull { it.mac !in marked }?.let { markDevice(it) }
+                if (boards.isNotEmpty() && boards.all { it.mac in marked }) { naming = true; setPhase(Phase.ROOMS) }
+            }
+            "walkRoom" -> {
+                val name = args.optString("name").trim().take(24)
+                if (name.isEmpty()) return
+                if (rooms.any { it.equals(name, true) } || roomOpen?.equals(name, true) == true) { log("Такая комната уже есть", true); return }
+                if (roomOpen != null && roomCorners == 0) roomOpen = null   // пустую комнату просто переименовали
+                newRoom(name); naming = roomOpen == null
+            }
+            "walkCorner" -> corner()
+            "walkRoomDone" -> { closeRoom(); if (roomOpen == null) naming = true }
+            "walkAddRoom" -> {
+                if (roomOpen != null && roomCorners > 0) closeRoom()
+                if (roomOpen == null || roomCorners == 0) naming = true
+            }
+            "walkScenario" -> {
+                if (roomOpen != null && roomCorners == 0) roomOpen = null   // открыли «+» и передумали
+                if (roomOpen == null || roomCorners >= 3) { naming = false; startScenario() }
+            }
+            "walkPause" -> r?.paused = true
+            "walkResume" -> { exitSheet = false; r?.paused = false }
+            "walkRedo" -> { r?.paused = false; r?.again() }
+            "walkSkip" -> r?.let { rr ->   // вся комната: походи, постой, посиди
+                rr.paused = false
+                val room = rr.current?.room
+                do rr.skip() while (room != null && !rr.done && !rr.waiting && rr.current?.room == room)
+            }
+            "walkExit" -> finishWalk(false)
+            "walkSave" -> finishWalk(true)
+            "walkBack" -> when {
+                phase == Phase.DONE -> {}
+                phase == Phase.SCENARIO && r != null && !r.waiting && r.current?.activity != "empty" -> r.paused = true
+                phase == Phase.ROOMS && naming && (rooms.isNotEmpty() || roomOpen != null) && roomOpen != null -> naming = false
+                else -> exitSheet = !exitSheet
+            }
+        }
+        pushHud()
+    }
+
+    /** Конец записи: полный обход — приложение начнёт учиться; брошенный — запись остаётся, обход начинают заново. */
+    private fun finishWalk(complete: Boolean) {
+        if (closing) return
+        closing = true
+        if (recording()) { client.flushPoses(); client.event("session_stop") }
+        getSharedPreferences("wsn-ui", MODE_PRIVATE).edit().putBoolean("walk_complete", complete).apply()
+        runner = null; preRunner = null
+        transport?.close(); transport = null   // ответы центра больше не нужны: иначе экран начал бы новую запись
+        finish()
+    }
+
+    private fun pushHud() {
+        val h = hud ?: return
+        if (toast != null && System.currentTimeMillis() > toastUntil) toast = null
+        h.push(hudState())
+    }
+
+    private fun hudState(): JSONObject {
+        val w = JSONObject()
+        toast?.let { w.put("msg", it) }
+        val r = runner
+        val roomList = JSONArray()
+        val active: String? = when (phase) {
+            Phase.ROOMS -> roomOpen
+            Phase.SCENARIO -> r?.current?.room
+            else -> null
+        }
+        val all = rooms + listOfNotNull(roomOpen?.takeIf { it !in rooms })
+        val activeIdx = active?.let { rooms.indexOf(it) } ?: -1
+        val tourOrLater = phase == Phase.SCENARIO && r != null && r.steps.take(r.index + 1).any { it.name == "tour" }
+        for ((i, n) in all.withIndex()) roomList.put(JSONObject().put("name", n).put("done",
+            n != active && (phase == Phase.ROOMS && n in rooms || phase == Phase.SCENARIO && (tourOrLater || activeIdx >= 0 && i < activeIdx) || phase == Phase.DONE)))
+        w.put("rooms", roomList)
+        active?.let { w.put("active", it) }
+        val outTotal = Scenario.EMPTY_S
+        val screen: String
+        var part = 0.0
+        when (phase) {
+            Phase.START -> { screen = if (client.online) "walk_out" else "walk_wait"; w.put("out", JSONObject().put("going", false).put("left", outTotal).put("total", outTotal)) }
+            Phase.OUT1 -> {
+                val p = preRunner
+                part = 0.1 * (if (out1Done) 1.0 else if (p == null || p.waiting) 0.0 else 1.0 - p.left / outTotal.toDouble())
+                screen = if (out1Done) "walk_back" else "walk_out"
+                w.put("out", JSONObject().put("going", p != null && !p.waiting).put("left", p?.left ?: outTotal).put("total", outTotal))
+            }
+            Phase.DEVICES -> {
+                part = 0.12
+                screen = "walk_find"
+                val boards = client.devices.filter { it.role == "board" }
+                w.put("boardsTotal", boards.size)
+                boards.withIndex().firstOrNull { it.value.mac !in marked }?.let { (i, b) -> w.put("board", JSONObject().put("name", b.name).put("i", i + 1)) }
+            }
+            Phase.ROOMS -> {
+                part = (0.15 + 0.05 * rooms.size).coerceAtMost(0.3)
+                if (naming || roomOpen == null) screen = "walk_room" else {
+                    screen = "walk_mark"
+                    w.put("corners", roomCorners)
+                    w.put("aim", when { tracking != TrackingState.TRACKING -> "lost"; floorY == null -> "nofloor"; hitPos == null -> "far"; else -> "ok" })
+                }
+            }
+            Phase.SCENARIO -> {
+                val st = r?.current
+                if (r != null && st != null) {
+                    val total = Scenario.totalSeconds(r.steps).toDouble()
+                    val doneS = r.steps.take(r.index).sumOf { it.seconds } + if (r.waiting) 0 else st.seconds - r.left
+                    part = 0.3 + 0.7 * (doneS / total)
+                }
+                screen = if (r == null || st == null) "walk_wait" else when {
+                    st.activity == "empty" -> { w.put("out", JSONObject().put("going", !r.waiting).put("left", r.left).put("total", st.seconds)); "walk_out" }
+                    r.waiting -> { w.put("out", JSONObject().put("total", outTotal)); "walk_back" }
+                    r.paused -> { w.put("pause", "task"); "walk_pause" }
+                    else -> {
+                        val kind = when { st.name == "tour" -> "tour"; st.name.startsWith("walk2:") -> "walk2"; else -> st.activity }
+                        w.put("task", JSONObject().put("kind", kind).put("room", st.room ?: JSONObject.NULL).put("left", r.left).put("total", st.seconds))
+                        "walk_task"
+                    }
+                }
+            }
+            Phase.DONE -> { part = 1.0; screen = "walk_back"; w.put("last", true).put("out", JSONObject().put("total", outTotal)) }
+        }
+        w.put("part", part)
+        val out = if (exitSheet && phase != Phase.DONE) { w.put("pause", "exit"); "walk_pause" } else screen
+        return JSONObject().put("screen", out).put("walk", w)
     }
 
     companion object {

@@ -68,6 +68,34 @@ class UiActivity : AppCompatActivity() {
         @Volatile private var flashError: Pair<String, String>? = null   // kind (auth|not_found|cable|other), text
         /** Flashed and keyed, but not on Wi-Fi: the board is still on the cable, only the network is asked again. */
         @Volatile private var wifiFailMac: String? = null
+
+        /** The board's USB port, asking for permission if needed (the board re-enumerates after flashing). */
+        fun openPort(ctx: Context): SerialPort {
+            val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
+            val end = System.currentTimeMillis() + 20000
+            while (System.currentTimeMillis() < end) {
+                val dev = usb.deviceList.values.firstOrNull { UsbSerialPort.matches(it) }
+                if (dev == null) { Thread.sleep(300); continue }
+                if (!usb.hasPermission(dev) && !askUsb(ctx, usb, dev)) throw EspLoader.EspError("нет разрешения на USB")
+                return UsbSerialPort.open(usb, dev)
+            }
+            throw EspLoader.EspError("жучок не найден по кабелю")
+        }
+
+        private fun askUsb(ctx: Context, usb: UsbManager, dev: UsbDevice): Boolean {
+            val latch = CountDownLatch(1)
+            var granted = false
+            val rx = object : BroadcastReceiver() {
+                override fun onReceive(c: Context, i: Intent) { granted = i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false); latch.countDown() }
+            }
+            val filter = IntentFilter(USB_PERMISSION)
+            if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(rx, filter, Context.RECEIVER_NOT_EXPORTED) else ctx.registerReceiver(rx, filter)
+            val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
+            usb.requestPermission(dev, PendingIntent.getBroadcast(ctx, 0, Intent(USB_PERMISSION).setPackage(ctx.packageName), flags))
+            latch.await(60, TimeUnit.SECONDS)
+            try { ctx.unregisterReceiver(rx) } catch (_: Exception) {}
+            return granted
+        }
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -81,6 +109,7 @@ class UiActivity : AppCompatActivity() {
     private var placeSince = 0L
     private var surveyStarted = 0L
     private var surveyDoneAt = 0L
+    private var surveyed: Set<String> = emptySet()   // жучки, которым опрос действительно ушёл
     private var walkBefore: String? = null      // newest session before the walk was started
     private var walkOpen = false
 
@@ -93,6 +122,7 @@ class UiActivity : AppCompatActivity() {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 8)
         screen = initialScreen()
         if (flashing.get()) screen = Screen.FLASHING
+        placeSince = System.currentTimeMillis()   // восстановили «Поставь» — две минуты отсчитываем заново
         walkBefore = prefs.getString("walk_before", null)
         walkOpen = prefs.getBoolean("walk_open", false)
         lastBoard = prefs.getString("last_board", null)
@@ -106,6 +136,8 @@ class UiActivity : AppCompatActivity() {
             settings.domStorageEnabled = false
             settings.textZoom = 100                       // макет рассчитан на 1:1; крупный шрифт системы ломает игрушку
             overScrollMode = WebView.OVER_SCROLL_NEVER
+            // пароль Wi-Fi уходит только в жучок: службы автозаполнения его не видят и не предлагают сохранить
+            if (Build.VERSION.SDK_INT >= 26) importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
             webViewClient = object : WebViewClientCompat() {
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
                     loader.shouldInterceptRequest(request.url)
@@ -127,7 +159,7 @@ class UiActivity : AppCompatActivity() {
             topPx = bars.top
             v.setPadding(bars.left, 0, bars.right, maxOf(bars.bottom, ime.bottom))
             applyTop()
-            insets
+            androidx.core.view.WindowInsetsCompat.CONSUMED   // иначе страница добавит отступ панели ещё раз
         }
         setContentView(root)
         web.loadUrl("https://appassets.androidplatform.net/assets/ui/index.html")
@@ -147,7 +179,7 @@ class UiActivity : AppCompatActivity() {
             screen in setOf(Screen.HELLO, Screen.CABLE_MISSING)) go(Screen.CABLE)
     }
 
-    override fun onDestroy() { main.removeCallbacksAndMessages(null); web.destroy(); super.onDestroy() }
+    override fun onDestroy() { ready = false; main.removeCallbacksAndMessages(null); web.destroy(); super.onDestroy() }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() { back() }
@@ -199,7 +231,7 @@ class UiActivity : AppCompatActivity() {
     private inner class Bridge {
         @JavascriptInterface fun send(action: String, json: String) {
             val args = try { JSONObject(json) } catch (e: Exception) { JSONObject() }
-            main.post { onAction(action, args) }
+            main.post { if (!isFinishing && !isDestroyed) onAction(action, args) }
         }
     }
 
@@ -207,12 +239,13 @@ class UiActivity : AppCompatActivity() {
         when (a) {
             "start" -> go(Screen.CABLE)
             "flash" -> startFlash(args.optString("ssid").trim(), args.optString("password"))
-            "retryWifi" -> startRetry(args.optString("ssid").trim(), args.optString("password"), Job.RETRY)
+            "retryWifi" -> if (wifiFailMac == null) startFlash(args.optString("ssid").trim(), args.optString("password"))  // ключа в плате ещё нет
+                else startRetry(args.optString("ssid").trim(), args.optString("password"), Job.RETRY)
             "newWifi" -> if (args.has("ssid")) startRetry(args.optString("ssid").trim(), args.optString("password"), Job.NEW_WIFI) else { error = null; go(Screen.WIFI_NEW) }
             "cableRetry", "reflash" -> { wifiFailMac = null; error = null; go(Screen.CABLE) }
             "otherNetwork" -> if (screen == Screen.WIFI_ERROR) { showSsid = true; push() }
             "placeNext" -> go(Screen.SILENCE)
-            "placeRecheck" -> { hub()?.announce(); if (screen == Screen.PLACE_LATE) go(Screen.PLACE) else placeSince = System.currentTimeMillis() }
+            "placeRecheck" -> { hub()?.announce(); placeSince = System.currentTimeMillis(); if (screen == Screen.PLACE_LATE) go(Screen.PLACE) }
             "surveyStart", "surveyRestart" -> { startSurvey(); push() }
             "surveySkip" -> go(Screen.WALK_INTRO)
             "walkStart" -> startWalk()
@@ -235,7 +268,7 @@ class UiActivity : AppCompatActivity() {
 
     private fun confirmRemove(mac: String) {
         val h = hub() ?: return
-        if (mac.isEmpty()) return
+        if (mac.isEmpty() || isFinishing || isDestroyed) return
         AlertDialog.Builder(this).setMessage("Убрать «${h.boardName(mac)}»? Чтобы вернуть, жучок снова подключают кабелем.")
             .setPositiveButton("Убрать") { _, _ -> runCatching { h.removeKey(mac) }; push() }
             .setNegativeButton("Оставить", null).show()
@@ -245,9 +278,9 @@ class UiActivity : AppCompatActivity() {
     private fun startFlash(ssid: String, password: String) {
         if (ssid.isEmpty()) return
         val h = hub() ?: return
-        val host = h.localIp() ?: run { error = "other" to "телефон не в домашнем Wi-Fi"; go(Screen.CABLE_MISSING); return }
+        val host = h.localIp() ?: run { error = "other" to "Телефон не в домашнем Wi-Fi"; go(Screen.CABLE_MISSING); return }
         val images = try { listOf("main", "lite").associateWith { assets.open("firmware/wsn-$it.bin").use { s -> s.readBytes() } } }
-            catch (e: java.io.IOException) { error = "other" to "в приложении нет программы для жучка"; go(Screen.CABLE_MISSING); return }
+            catch (e: java.io.IOException) { error = "other" to "В приложении нет программы для жучка"; go(Screen.CABLE_MISSING); return }
         if (!beginJob(Job.FLASH, "Связь с жучком…")) return
         val key = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
         val app = applicationContext
@@ -271,7 +304,7 @@ class UiActivity : AppCompatActivity() {
             } catch (e: OtgProvision.NetworkNotSeen) {
                 flashError = "not_found" to (e.message ?: "")
             } catch (e: Exception) {
-                flashError = "cable" to (e.message ?: e.javaClass.simpleName)
+                flashError = cableError(e)
             } finally {
                 flashing.set(false)
             }
@@ -295,12 +328,15 @@ class UiActivity : AppCompatActivity() {
             } catch (e: OtgProvision.NetworkNotSeen) {
                 flashError = "not_found" to (e.message ?: "")
             } catch (e: Exception) {
-                flashError = "cable" to (e.message ?: e.javaClass.simpleName)
+                flashError = cableError(e)
             } finally {
                 flashing.set(false)
             }
         }
     }
+
+    private fun cableError(e: Exception): Pair<String, String> =
+        if (e.message?.contains("разрешения на USB") == true) "other" to "Разреши доступ к USB" else "cable" to (e.message ?: e.javaClass.simpleName)
 
     private fun beginJob(kind: Job, text: String): Boolean {
         if (!flashing.compareAndSet(false, true)) { go(Screen.FLASHING); return false }
@@ -310,58 +346,30 @@ class UiActivity : AppCompatActivity() {
         return true
     }
 
-    /** The board's USB port, asking for permission if needed (the board re-enumerates after flashing). */
-    private fun openPort(ctx: Context): SerialPort {
-        val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
-        val end = System.currentTimeMillis() + 20000
-        while (System.currentTimeMillis() < end) {
-            val dev = usb.deviceList.values.firstOrNull { UsbSerialPort.matches(it) }
-            if (dev == null) { Thread.sleep(300); continue }
-            if (!usb.hasPermission(dev) && !askUsb(ctx, usb, dev)) throw EspLoader.EspError("нет разрешения на USB")
-            return UsbSerialPort.open(usb, dev)
-        }
-        throw EspLoader.EspError("жучок не найден по кабелю")
-    }
-
-    private fun askUsb(ctx: Context, usb: UsbManager, dev: UsbDevice): Boolean {
-        val latch = CountDownLatch(1)
-        var granted = false
-        val rx = object : BroadcastReceiver() {
-            override fun onReceive(c: Context, i: Intent) { granted = i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false); latch.countDown() }
-        }
-        val filter = IntentFilter(USB_PERMISSION)
-        if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(rx, filter, Context.RECEIVER_NOT_EXPORTED) else ctx.registerReceiver(rx, filter)
-        val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
-        usb.requestPermission(dev, PendingIntent.getBroadcast(ctx, 0, Intent(USB_PERMISSION).setPackage(ctx.packageName), flags))
-        latch.await(60, TimeUnit.SECONDS)
-        try { ctx.unregisterReceiver(rx) } catch (_: Exception) {}
-        return granted
-    }
-
     // ======================= quiet minute, walk, training =======================
     private fun startSurvey() {
         val h = hub() ?: return
         val live = h.boards().map { it.mac }.toSet()
         h.knownBoards().forEach { h.surveys.remove(it) }      // прошлый опрос не должен сразу «закончить» минуту
-        h.knownBoards().filter { it in live }.forEach { h.survey(it) }
+        surveyed = h.knownBoards().filter { it in live && h.survey(it) }.toSet()
         surveyStarted = System.currentTimeMillis(); surveyDoneAt = 0
     }
 
     private fun startWalk() {
         walkBefore = hub()?.sessions()?.firstOrNull()?.name
         walkOpen = true
-        prefs.edit().putString("walk_before", walkBefore).putBoolean("walk_open", true).apply()
+        prefs.edit().putString("walk_before", walkBefore).putBoolean("walk_open", true).putBoolean("walk_complete", false).apply()
         startActivity(Intent(this, CaptureActivity::class.java))
     }
 
-    /** Back from the walk: no camera — say so; a new recording — train on it. */
+    /** Back from the walk: no camera — say so; a finished walk — train on it (a dropped one stays on disk, not trained). */
     private fun afterWalk() {
         val h = hub() ?: return
         walkOpen = false
         prefs.edit().putBoolean("walk_open", false).apply()
         val newest = h.sessions().firstOrNull()?.name
         when {
-            newest != null && newest != walkBefore -> { h.trainNewest(); go(Screen.LEARNING) }
+            newest != null && newest != walkBefore && prefs.getBoolean("walk_complete", false) -> { h.trainNewest(); go(Screen.LEARNING) }
             ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED -> go(Screen.CAMERA_DENIED)
             else -> go(Screen.WALK_INTRO)
         }
@@ -404,6 +412,7 @@ class UiActivity : AppCompatActivity() {
                     if (job == Job.NEW_WIFI) { go(Screen.HOME); return }
                     lastBoard = mac; prefs.edit().putString("last_board", mac).apply()
                     go(Screen.PLACE)
+                    return
                 }
                 if (!flashing.get() && flashResult == null && flashError == null) go(Screen.CABLE)   // работа пропала (процесс перезапущен)
             }
@@ -417,9 +426,8 @@ class UiActivity : AppCompatActivity() {
             Screen.SILENCE -> {
                 if (h == null) return
                 if (surveyStarted == 0L) startSurvey()
-                val boards = h.knownBoards()
-                val done = boards.isNotEmpty() && boards.all { (h.surveys[it]?.state ?: 0) >= 3 } ||
-                    System.currentTimeMillis() - surveyStarted > 150_000
+                val done = surveyed.isNotEmpty() && surveyed.all { (h.surveys[it]?.state ?: 0) >= 3 } ||
+                    System.currentTimeMillis() - surveyStarted > (if (surveyed.isEmpty()) 60_000 else 80_000)
                 if (done && surveyDoneAt == 0L) surveyDoneAt = System.currentTimeMillis()
                 if (surveyDoneAt > 0 && System.currentTimeMillis() - surveyDoneAt > 2500) go(Screen.WALK_INTRO)
             }

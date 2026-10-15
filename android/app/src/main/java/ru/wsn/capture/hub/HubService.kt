@@ -253,9 +253,11 @@ class HubService : Service() {
         return s.removeSurrounding("\"").takeIf { it.isNotEmpty() && it != "<unknown ssid>" }
     }
 
-    /** The phone is not on the home network: no address, or (when the name is readable) another network. */
+    /** The phone is not on the home network: no address, or (when the name is readable) another network.
+     *  Boards heard = at home, whatever the network is called (2,4 and 5 GHz often have different names). */
     fun isAway(): Boolean {
         if (localIp() == null) return true
+        if (boards(offlineAfterS).isNotEmpty()) return false
         val home = homeSsid ?: return false
         val cur = currentSsid() ?: return false
         return cur != home

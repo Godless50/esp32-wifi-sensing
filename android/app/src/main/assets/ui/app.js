@@ -7,9 +7,11 @@ import {
 } from './ui.mjs';
 import { resetIds } from './bug.mjs';
 import * as P from './parts.mjs';
+import { WALK } from './walk.mjs';
 
 /* ================= оболочка экрана ================= */
 const APP_CSS = `${TOKENS}
+html.walk,html.walk body{background:transparent!important}
 html,body{margin:0;background:var(--bg);overscroll-behavior:none;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
 #app{position:fixed;inset:0}
 .scr{position:absolute;inset:0;display:flex;flex-direction:column;overflow:hidden}
@@ -27,7 +29,7 @@ html,body{margin:0;background:var(--bg);overscroll-behavior:none;-webkit-tap-hig
 .flow{flex:none;padding:0 20px 24px}
 .bot{flex:none;display:flex;flex-direction:column;padding:12px 20px calc(24px + env(safe-area-inset-bottom,0px));position:relative;z-index:3}
 .bot .btn{position:relative;left:auto;right:auto;bottom:auto}
-.bot .link{position:relative;left:auto;right:auto;margin-top:18px;margin-bottom:-6px}
+.bot .link{position:relative;left:auto;right:auto;margin-top:26px;margin-bottom:-6px}
 .bot>.link:first-child{margin-top:0}
 .btn.off{background:var(--greyL);color:var(--ink2);box-shadow:0 6px 0 var(--edgeGrey)}
 [data-act],[data-ui]{cursor:pointer}
@@ -45,7 +47,8 @@ input,textarea{user-select:text;-webkit-user-select:text}
 
 /** v: { bg, css, head, y0, h, cv, flow, bot, fit=true, start } → HTML экрана */
 const shell = (v) => `<style>${v.css || ''}</style>
-<div class="scr" style="background:${v.bg || K.bg}">
+<div class="scr${v.cls ? ` ${v.cls}` : ''}" style="background:${v.bg || K.bg}">
+ ${v.raw || ''}
  <div class="top">${v.head || ''}</div>
  <div class="mid${v.start ? ' start' : ''}">
   ${v.h ? `<div class="stage" data-h="${v.h}"${v.fit === false ? ' data-nofit' : ''} style="height:${v.h}px"><div class="sc"><div class="cv" style="top:${-v.y0}px;height:${v.y0 + v.h}px">${v.cv}</div></div></div>` : ''}
@@ -100,12 +103,16 @@ ${pwField(st, 600, `Пароль ${P.onlyBug()}`)}`,
   bot: submit(btn, a, { arrow: true }),
 });
 S.cable = (st) => cableLike(st, { head: tHead(st, 1), h1: 'Подключи жучок', sub: 'Кабелем к телефону', btn: 'Записать в жучок', a: 'flash' });
-S.wifi_new = (st) => cableLike(st, { head: plainHead(''), h1: 'Новый Wi-Fi', sub: 'Кабелем к телефону', btn: 'Записать в жучок', a: 'newWifi' });
+const WN = { auth: ['Роутер не пустил', 'Пароль ещё разок?'], not_found: ['Не вижу сеть', 'Имя сети верное?'], cable: ['Не вижу жучок', 'Кабель до конца?'] };
+S.wifi_new = (st) => {
+  const e = WN[st.error?.kind] || (st.error ? ['Не вышло', P.esc(st.error.text || 'Ещё раз?')] : ['Новый Wi-Fi', 'Кабелем к телефону']);
+  return cableLike(st, { head: plainHead(''), h1: e[0], sub: e[1], btn: 'Записать в жучок', a: 'newWifi' });
+};
 
 S.cable_missing = (st) => ({
   bg: K.err, css: `.art{position:absolute;left:40px;top:346px}${P.ASK_CSS}`,
   head: tHead(st, 1), y0: 104, h: 516,
-  cv: `${title({ h: 'Не вижу жучок', sub: 'Кабель до конца?', top: 132 })}
+  cv: `${title({ h: 'Не вижу жучок', sub: st.error?.kind === 'other' && st.error.text ? P.esc(st.error.text) : 'Кабель до конца?', top: 132 })}
 ${c390(`<div class="art">${bug({ pose: 'plug', size: HERO.mid, brows: 'sad', mouth: 'small', look: [3, -3] })}</div>${P.phoneScene({ bx: 40, by: 346, ask: true })}`)}`,
   bot: act(button({ label: 'Ещё раз' }), 'cableRetry'),
 });
@@ -415,6 +422,8 @@ S.settings = (st) => {
   };
 };
 
+Object.assign(S, WALK); // обход поверх камеры (walk.html)
+
 /* ================= отрисовка ================= */
 const ui = { showPw: false, openMac: null };
 let state = null, lastJson = '', lastScreen = '';
@@ -493,6 +502,11 @@ function doAction(el) {
     args = { ssid, password: pwEl ? pwEl.value : '' };
     if (pwEl) { pwEl.value = ''; pwEl.blur(); } // пароль сразу стираем, нигде не храним
   }
+  if (el.dataset.submit && a === 'walkRoom') {
+    const r = document.getElementById('room'), name = (r ? r.value : '').trim();
+    if (!name) { r?.focus(); return; }
+    args = { name }; r.value = ''; r.blur();
+  }
   send(a, args);
 }
 
@@ -523,6 +537,7 @@ function onKey(e) {
   if (e.key === 'Enter' && e.target.tagName === 'INPUT') {
     const b = root().querySelector('[data-submit]');
     if (e.target.id === 'ssid') document.getElementById('pw')?.focus();
+    else if (e.target.id === 'room') { const g = root().querySelector('[data-act="walkRoom"][data-submit]'); if (g) doAction(g); }
     else if (b) doAction(b);
   }
 }
