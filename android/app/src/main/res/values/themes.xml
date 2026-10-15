@@ -2,7 +2,7 @@
 <resources>
     <style name="Theme.Capture" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowFullscreen">true</item>
-        <item name="android:windowBackground">@android:color/black</item>
-        <item name="colorAccent">#3B82F6</item>
+        <item name="android:windowBackground">@color/spy_bg</item>
+        <item name="colorAccent">#FF9F43</item>
     </style>
 </resources>

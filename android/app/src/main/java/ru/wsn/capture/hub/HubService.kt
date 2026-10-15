@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import org.json.JSONObject
+import ru.wsn.capture.core.EventLog
 import ru.wsn.capture.core.HubEngine
 import ru.wsn.capture.core.LocalCapture
 import ru.wsn.capture.core.TrainPipeline
@@ -72,6 +73,13 @@ class HubService : Service() {
         private set
     @Volatile var train = TrainState(false, "", 0.0, "")
         private set
+    /** The diary of the main screen; kept in a file so a restart of the phone does not empty it. */
+    val events = EventLog()
+    private val eventsFile: File get() = File(filesDir, "events.json")
+    /** Boards silent this long count as «нет связи» (they send many times a second). */
+    val offlineAfterS = 60.0
+    /** When the service started (unix seconds): right after a start nothing is heard yet, which is not «нет связи». */
+    val startedAt = System.currentTimeMillis() / 1000.0
 
     fun now() = System.currentTimeMillis() / 1000.0
 
@@ -124,6 +132,7 @@ class HubService : Service() {
         engine = HubEngine(model = loadModel(), quiet = quietFromModel(), keyFor = { keyCache[it] },
             rawSink = { buf, t -> record(buf, t) })
         local = LocalCapture(sessionsDir, ::now, { boards().map { it.mac to it.name } }, ::onSession)
+        try { if (eventsFile.exists()) events.load(eventsFile.readText()) } catch (e: Exception) { Log.w(TAG, "events unreadable", e) }
         current = this
     }
 
@@ -205,7 +214,29 @@ class HubService : Service() {
 
     private fun tickOnce() {
         try { verdict = engine.tick(now()) } catch (e: Exception) { Log.w(TAG, "tick", e) }
+        try { diary() } catch (e: Exception) { Log.w(TAG, "events", e) }
     }
+
+    /** One state per second into the diary: no board heard for a minute is «нет связи», not «никого». */
+    private fun diary() {
+        if (keyCache.isEmpty() || modelMeta() == null) return     // до конца настройки дневник не ведём
+        val t = now()
+        val v = verdict
+        val e = when {
+            boards(offlineAfterS).isEmpty() && lastHeard() == null && t - startedAt < offlineAfterS -> null
+            boards(offlineAfterS).isEmpty() -> events.feed(t, EventLog.State.OFFLINE)
+            v == null -> null
+            v.emptyP >= 0.5 -> events.feed(t, EventLog.State.EMPTY)
+            else -> events.feed(t, EventLog.State.PRESENT, if (modelMeta()?.optBoolean("rooms_ok") == true) v.zone else null)
+        }
+        if (e != null) {
+            val tmp = File(filesDir, "events.json.tmp")
+            tmp.writeText(events.toJson()); tmp.renameTo(eventsFile)
+        }
+    }
+
+    /** When any board was last heard (unix seconds), or null if never since the start. */
+    fun lastHeard(): Double? = seen.values.maxOfOrNull { it.first }
 
     /** Boards that sent something in the last `withinS` seconds (only boards whose key we hold get through). */
     fun boards(withinS: Double = 15.0): List<Board> {
@@ -293,12 +324,12 @@ class HubService : Service() {
     private fun notification(): Notification {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, "Датчик присутствия", NotificationManager.IMPORTANCE_LOW))
+            nm.createNotificationChannel(NotificationChannel(CHANNEL, "Штаб", NotificationManager.IMPORTANCE_LOW))
         }
         @Suppress("DEPRECATION")
         val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
-        return b.setContentTitle("Датчик присутствия работает")
-            .setContentText("Телефон слушает платы и определяет комнаты")
+        return b.setContentTitle("Штаб на посту")
+            .setContentText("Жучок замечает, есть ли кто-то дома. Не закрывайте")
             .setSmallIcon(android.R.drawable.ic_menu_compass).setOngoing(true).build()
     }
 

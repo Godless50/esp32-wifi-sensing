@@ -39,6 +39,13 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true  // снимки экранов (ScreensTest) со шрифтами и цветами
+            // в Docker у пользователя нет записи в passwd (user.home = "?"): Robolectric кладёт SDK в ~/.m2
+            all { it.systemProperty("user.home", System.getenv("HOME") ?: "/tmp") }
+        }
+    }
 }
 
 dependencies {
@@ -48,5 +55,7 @@ dependencies {
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")  // сканер QR-кода сопряжения
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
-    testImplementation("com.fazecast:jSerialComm:2.11.0")  // проверка прошивальщика на настоящей плате (WSN_HW_PORT)
+    testImplementation("com.fazecast:jSerialComm:2.11.0")
+    testImplementation("org.robolectric:robolectric:4.14.1")      // снимки экранов без телефона
+    testImplementation("androidx.test:core:1.6.1")  // проверка прошивальщика на настоящей плате (WSN_HW_PORT)
 }

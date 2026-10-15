@@ -24,6 +24,9 @@ class OtgProvision(
         else -> "плата не подключилась к Wi-Fi (роутер далеко или выключен?)"
     })
 
+    /** The board does not hear a network with this name (a typo, or 5 GHz only). Nothing was written into it yet. */
+    class NetworkNotSeen(val ssid: String) : Exception("плата не видит сеть «$ssid» (2,4 ГГц?)")
+
     /** Returns the board MAC, which image was flashed and the address the board got.
      *  onProgress: 0..100 during the write. beforeProvision(mac): called once the board's MAC is known and before
      *  the key goes into it — the caller stores the key first, so a failure later never leaves a board with a key
@@ -75,7 +78,7 @@ class OtgProvision(
     private fun bssidFor(console: Console, s: Settings) = s.bssid.ifEmpty {
         // узел сети, который плата слышит лучше всего (в mesh у каждой платы свой)
         log("ищу сеть «${s.ssid}»")
-        console.bestBssid(s.ssid) ?: throw EspLoader.EspError("плата не видит сеть «${s.ssid}» (2,4 ГГц?)")
+        console.bestBssid(s.ssid) ?: throw NetworkNotSeen(s.ssid)
     }
 
     /** The board reboots after the settings and re-enumerates; watch its STATUS until it is on the network. */

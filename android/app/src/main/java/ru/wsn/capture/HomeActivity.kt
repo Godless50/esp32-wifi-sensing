@@ -40,9 +40,21 @@ class HomeActivity : AppCompatActivity() {
         if (p == null) toastDialog("Это не QR-код сопряжения. Покажите код из ./install.sh pair") else askPassword(p)
     }
 
+    companion object {
+        /** Open the computer-mode screen even when this phone is the hub (from the hub's settings). */
+        const val EXTRA_CLASSIC = "classic"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Server.init(this)
+        if (!Server.paired() && !intent.getBooleanExtra(EXTRA_CLASSIC, false)) {
+            // обычный человек: без компьютера телефон — штаб; настроен — сразу штаб, иначе настройка
+            ru.wsn.capture.hub.HubService.start(this)
+            val ready = java.io.File(filesDir, "model/model.json").exists()
+            startActivity(Intent(this, if (ready) HubMapActivity::class.java else SetupActivity::class.java))
+            finish(); return
+        }
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 72, 40, 40) }
         col.addView(TextView(this).apply { text = "WSN — присутствие по Wi-Fi"; textSize = 24f; setTextColor(Color.WHITE) })
         info = TextView(this).apply { textSize = 15f; setTextColor(Color.rgb(209, 213, 219)); setPadding(0, 32, 0, 32) }
