@@ -52,7 +52,7 @@ import kotlin.concurrent.thread
  *  Пароль Wi-Fi проходит только из поля страницы в OtgProvision и в плату; здесь он нигде не хранится. */
 class UiActivity : AppCompatActivity() {
     enum class Screen { HELLO, CABLE, CABLE_MISSING, FLASHING, WIFI_ERROR, WIFI_NEW, PLACE, PLACE_ONLINE, PLACE_LATE,
-        SILENCE, WALK_INTRO, CAMERA_DENIED, LEARNING, LEARN_FAILED, RESULT, HOME, EVENTS, SETTINGS }
+        SILENCE, WALK_INTRO, CAMERA_DENIED, LEARNING, LEARN_FAILED, RESULT, HOME, EVENTS, SETTINGS, MAP }
 
     private enum class Job { FLASH, RETRY, NEW_WIFI }
 
@@ -204,7 +204,7 @@ class UiActivity : AppCompatActivity() {
         // запоминаем шаг настройки; временные экраны откроются с их «родителя»
         val keep = when (s) {
             Screen.FLASHING, Screen.CABLE_MISSING, Screen.WIFI_ERROR -> Screen.CABLE
-            Screen.WIFI_NEW, Screen.EVENTS, Screen.SETTINGS -> Screen.HOME
+            Screen.WIFI_NEW, Screen.EVENTS, Screen.SETTINGS, Screen.MAP -> Screen.HOME
             Screen.PLACE_LATE, Screen.PLACE_ONLINE -> Screen.PLACE
             Screen.CAMERA_DENIED -> Screen.WALK_INTRO
             Screen.LEARN_FAILED -> Screen.WALK_INTRO
@@ -218,7 +218,7 @@ class UiActivity : AppCompatActivity() {
         when (screen) {
             Screen.HELLO, Screen.HOME -> moveTaskToBack(true)
             Screen.FLASHING, Screen.LEARNING -> moveTaskToBack(true)        // идёт работа — не прерываем
-            Screen.EVENTS, Screen.SETTINGS, Screen.WIFI_NEW, Screen.RESULT -> go(Screen.HOME)
+            Screen.EVENTS, Screen.SETTINGS, Screen.WIFI_NEW, Screen.RESULT, Screen.MAP -> go(Screen.HOME)
             Screen.CABLE, Screen.CABLE_MISSING, Screen.WIFI_ERROR -> go(if (hasModel()) Screen.HOME else Screen.HELLO)
             Screen.PLACE, Screen.PLACE_ONLINE, Screen.PLACE_LATE -> go(if (hasModel()) Screen.HOME else Screen.CABLE)
             Screen.SILENCE -> go(Screen.PLACE_ONLINE)
@@ -253,6 +253,7 @@ class UiActivity : AppCompatActivity() {
             "learnRetry", "rewalk" -> go(Screen.WALK_INTRO)
             "openHome" -> go(Screen.HOME)
             "openEvents" -> go(Screen.EVENTS)
+            "openMap" -> go(Screen.MAP)
             "openSettings" -> go(Screen.SETTINGS)
             "back" -> back()
             "addBoard" -> { wifiFailMac = null; error = null; go(Screen.CABLE) }
@@ -499,7 +500,7 @@ class UiActivity : AppCompatActivity() {
                     .put("motion", held?.optDouble("moving_bal_acc", 0.0) ?: 0.0)
                     .put("rooms", rooms?.let { JSONArray(it) } ?: JSONObject.NULL))
             }
-            if (screen == Screen.HOME || screen == Screen.EVENTS) o.put("home", homeState(h, meta))
+            if (screen == Screen.HOME || screen == Screen.EVENTS || screen == Screen.MAP) o.put("home", homeState(h, meta))
         }
         o.put("checklist", JSONObject().put("notifications", notificationsOk())
             .put("battery", (getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)))
@@ -534,11 +535,26 @@ class UiActivity : AppCompatActivity() {
         val o = JSONObject().put("state", state).put("now", (now - dayStart) / 3600.0)
         if (roomsOk) {
             o.put("rooms", JSONArray(roomNames(meta!!)))
+            // комната — та, где точка (она уже очищена от скачков); без точки — что сказала модель
             if (state == "moving" || state == "quiet") v?.zone?.let { o.put("zone", it) }
         }
         when (state) {
             "offline" -> (h.lastHeard() ?: events.firstOrNull { it.state == ru.wsn.capture.core.EventLog.State.OFFLINE }?.t)?.let { o.put("since", hm(it)) }
             "away" -> events.firstOrNull { it.state == ru.wsn.capture.core.EventLog.State.NODATA }?.t?.let { o.put("since", hm(it)) }
+        }
+        // план и человек на нём: комнаты (с поправленными стенами), жучки, точка без скачков
+        val plan = h.planRooms()
+        if (plan.isNotEmpty()) {
+            val boardsXy = JSONArray()
+            meta?.optJSONObject("boards")?.let { b -> for (k in b.keys()) b.optJSONArray(k)?.let { boardsXy.put(it) } }
+            o.put("plan", JSONObject().put("boards", boardsXy).put("rooms", JSONArray().apply {
+                for (r in plan) put(JSONObject().put("name", r.name).put("poly", JSONArray().apply { for (p in r.poly) put(JSONArray().put(p[0]).put(p[1])) }))
+            }))
+            val d = h.dot
+            if (d != null && (state == "moving" || state == "quiet")) {
+                o.put("dot", JSONObject().put("x", d.x).put("y", d.y).put("r", d.r))
+                if (!h.placeError75().isNaN()) o.put("err", h.placeError75())
+            }
         }
         val (segs, items) = HomeDay.build(events, dayStart, now)
         o.put("day", JSONArray().apply { for (s in segs) put(JSONArray().put(s.from).put(s.to).put(s.state)) })

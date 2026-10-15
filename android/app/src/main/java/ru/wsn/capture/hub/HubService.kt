@@ -73,6 +73,32 @@ class HubService : Service() {
         private set
     @Volatile var train = TrainState(false, "", 0.0, "")
         private set
+    /** The person on the plan, cleaned of jumps (DotTracker); null — nobody home, no plan or no placement. */
+    @Volatile var dot: ru.wsn.capture.core.DotTracker.Dot? = null
+        private set
+    private val tracker = ru.wsn.capture.core.DotTracker()
+    @Volatile private var planCache: Pair<JSONObject?, List<ru.wsn.capture.core.TrainPipeline.Room>>? = null
+
+    /** Rooms of the plan from model.json (as trained, with the walls edited by hand). */
+    fun planRooms(): List<ru.wsn.capture.core.TrainPipeline.Room> {
+        val meta = modelMeta() ?: return emptyList()
+        planCache?.let { if (it.first === meta) return it.second }
+        val arr = meta.optJSONArray("rooms") ?: org.json.JSONArray()
+        val rooms = (0 until arr.length()).mapNotNull { i ->
+            val r = arr.optJSONObject(i) ?: return@mapNotNull null
+            val p = r.optJSONArray("polygon") ?: return@mapNotNull null
+            val poly = (0 until p.length()).mapNotNull { k -> p.optJSONArray(k)?.let { doubleArrayOf(it.getDouble(0), it.getDouble(1)) } }
+            if (poly.size >= 3) ru.wsn.capture.core.TrainPipeline.Room(r.optString("name"), poly) else null
+        }
+        planCache = meta to rooms
+        return rooms
+    }
+
+    /** Median placement error of the model, metres (NaN — the model cannot place the person). */
+    fun placeError(): Double = if (!this::engine.isInitialized) Double.NaN else engine.model?.fpErr ?: Double.NaN
+    /** «Обычно в пределах»: 75-й перцентиль ошибки — ореол точки. */
+    fun placeError75(): Double = if (!this::engine.isInitialized) Double.NaN else engine.model?.let { if (it.fpErr75.isNaN()) it.fpErr else it.fpErr75 } ?: Double.NaN
+    private var trackerModel = -1
     /** The diary of the main screen; kept in a file so a restart of the phone does not empty it. */
     val events = EventLog()
     private val eventsFile: File get() = File(filesDir, "events.json")
@@ -162,7 +188,7 @@ class HubService : Service() {
         if (!modelFile.exists()) return null
         val m = modelFile.lastModified()
         metaCache?.let { if (it.first == m) return it.second }
-        val j = try { JSONObject(modelFile.readText()).apply { remove("nets"); remove("mu"); remove("sd") } } catch (e: Exception) { null }
+        val j = try { JSONObject(modelFile.readText()).apply { remove("nets"); remove("mu"); remove("sd"); remove("fp") } } catch (e: Exception) { null }
         metaCache = m to j
         return j
     }
@@ -213,8 +239,24 @@ class HubService : Service() {
     }
 
     private fun tickOnce() {
-        try { verdict = engine.tick(now()) } catch (e: Exception) { Log.w(TAG, "tick", e) }
+        try { verdict = engine.tick(now()) } catch (e: Exception) { verdict = null; engine.lastFix = null; Log.w(TAG, "tick", e) }
+        try { dot = trackDot() } catch (e: Exception) { dot = null; Log.w(TAG, "dot", e) }
         try { diary() } catch (e: Exception) { Log.w(TAG, "events", e) }
+    }
+
+    /** The dot is shown only when it can be trusted: rooms are told apart (or there is one room), every link of the
+     *  model is alive (a silent board shifts the fingerprints), and it stays in the room the classifier is sure of. */
+    private fun trackDot(): ru.wsn.capture.core.DotTracker.Dot? {
+        val m = engine.model
+        val ver = m?.version ?: -1
+        if (ver != trackerModel) { tracker.reset(); trackerModel = ver }    // новый обход — новые координаты
+        val v = verdict
+        val rooms = planRooms()
+        val roomsOk = modelMeta()?.optBoolean("rooms_ok") == true || rooms.size == 1
+        val linksOk = m != null && v != null && v.linksLive >= m.links.size
+        val present = v != null && v.emptyP < 0.5 && boards(offlineAfterS).isNotEmpty() && !isAway() && roomsOk && linksOk
+        val sure = if (v != null && v.zoneP >= 0.6 && modelMeta()?.optBoolean("rooms_ok") == true) rooms.firstOrNull { it.name == v.zone } else null
+        return tracker.update(now(), present, v?.movingP ?: 0.0, engine.lastFix, rooms, placeError75(), sure)
     }
 
     /** One state per second into the diary: no board heard for a minute is «нет связи», not «никого»;

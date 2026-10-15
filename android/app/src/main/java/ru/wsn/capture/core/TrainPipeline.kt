@@ -42,6 +42,10 @@ object TrainPipeline {
     /** Rooms are shown when the held-out balanced room accuracy reaches this and beats chance clearly. */
     const val ROOMS_MIN_ACC = 0.6
     const val ROOMS_OVER_CHANCE = 0.2
+    /** Fingerprints kept in the model for placing the person on the plan, and how they are checked. */
+    const val FP_MAX = 900
+    const val FP_K = 7
+    const val FP_EXCLUDE_S = 30.0
 
     class TrainError(msg: String) : Exception(msg)
 
@@ -134,6 +138,13 @@ object TrainPipeline {
             "room_new" -> { finish(); cur = e.optString("name", "комната") to ArrayList() }
             "corner" -> e.optJSONArray("p")?.let { p -> cur?.second?.add(floor(p)) }
             "room_close" -> { finish(); cur = null }
+            // стены, поправленные вручную перед сохранением плана: заменяют то, что получилось из углов
+            "room_edit" -> {
+                finish(); cur = null
+                val pts = e.optJSONArray("poly") ?: continue
+                val poly = (0 until pts.length()).mapNotNull { i -> pts.optJSONArray(i)?.let { doubleArrayOf(it.getDouble(0), it.getDouble(1)) } }
+                if (poly.size >= 3 && abs(area(poly)) >= 0.5) out[e.optString("name", "комната")] = poly
+            }
         }
         finish()
         return out.map { Room(it.key, it.value) }
@@ -264,6 +275,45 @@ object TrainPipeline {
         }
     }
 
+    // ---------------- fingerprints: where the person was ----------------
+    /** Phone position at time t (the walker carries it), if the trajectory has a pose close enough. */
+    fun posAt(tr: Array<DoubleArray>, t: Double): DoubleArray? {
+        if (tr.isEmpty()) return null
+        var lo = 0; var hi = tr.size - 1
+        while (lo < hi) { val mid = (lo + hi) / 2; if (tr[mid][0] < t) lo = mid + 1 else hi = mid }
+        var best = lo
+        if (lo > 0 && abs(tr[lo - 1][0] - t) < abs(tr[lo][0] - t)) best = lo - 1
+        return if (abs(tr[best][0] - t) <= POS_MAX_GAP_S) doubleArrayOf(tr[best][1], tr[best][2]) else null
+    }
+
+    /** Windows with a known room and a known phone position -> (embedding, position) pairs kept in the model,
+     *  plus the honest median error: each window is placed without the fingerprints of the 30 s around it. */
+    fun fingerprints(s: Session, ends: DoubleArray, ki: List<Int>, z: Array<DoubleArray>, xk: Array<Array<DoubleArray>>,
+                     model: ZoneModel, nRooms: Int): JSONObject? {
+        val idx = ArrayList<Int>(); val pos = ArrayList<DoubleArray>(); val tt = ArrayList<Double>()
+        ki.forEachIndexed { q, w ->
+            if (z[w].sum() != 1.0 || z[w][nRooms] == 1.0) return@forEachIndexed     // только «человек в комнате»
+            val p = posAt(s.traj, ends[w] - POS_LAG_S) ?: return@forEachIndexed
+            idx.add(q); pos.add(p); tt.add(ends[w])
+        }
+        if (idx.size < 30) return null
+        val step = maxOf(1, (idx.size + FP_MAX - 1) / FP_MAX)
+        val keep = idx.indices.filter { it % step == 0 }
+        val e = model.embed(Array(keep.size) { xk[idx[keep[it]]] })
+        val p = Array(keep.size) { pos[keep[it]] }
+        val t = DoubleArray(keep.size) { tt[keep[it]] }
+        val errs = ArrayList<Double>()
+        for (i in keep.indices) {
+            val f = ZoneModel.nearest(e[i], e, p, FP_K) { j -> abs(t[j] - t[i]) < FP_EXCLUDE_S } ?: continue
+            errs.add(hypot(f.x - p[i][0], f.y - p[i][1]))
+        }
+        if (errs.isEmpty()) return null
+        fun r(v: Double) = Math.round(v * 1000.0) / 1000.0
+        return JSONObject().put("k", FP_K).put("err", r(percentile(errs, 50.0))).put("err75", r(percentile(errs, 75.0)))
+            .put("e", JSONArray().also { a -> for (row in e) a.put(JSONArray().also { x -> for (v in row) x.put(r(v)) }) })
+            .put("p", JSONArray().also { a -> for (row in p) a.put(JSONArray().put(r(row[0])).put(r(row[1]))) })
+    }
+
     // ---------------- nets ----------------
     class JavaRng(seed: Long) : Trainer.TrainRng {
         val r = Random(seed)
@@ -379,6 +429,8 @@ object TrainPipeline {
             progress("обучение ${n + 1}/$nets", 0.65 + 0.33 * n / nets)
             Trainer.fitNet(xk, zk, mk, mu, sd, initNet(d, k, cfg, r), cfg, JavaRng(r.nextLong()))
         }
+        progress("точки на плане", 0.98)
+        val fp = fingerprints(s, ends, ki, z, xk, ZoneModel.fromJson(modelJson(0, links, zones, mu, sd, ens).toString()), rooms.size)
         val acc = cv.optDouble("zone_bal_acc", 0.0); val chance = cv.optDouble("chance", 1.0)
         val roomsOk = rooms.size >= 2 && acc >= ROOMS_MIN_ACC && acc >= chance + ROOMS_OVER_CHANCE
         val version = (System.currentTimeMillis() / 1000).toInt()
@@ -390,6 +442,7 @@ object TrainPipeline {
         val boards = JSONObject(); s.boardMarks.forEach { (mac, xy) -> boards.put(mac, JSONArray(xy.toList())) }
         json.put("quiet", q).put("rooms_ok", roomsOk).put("rooms", planJson).put("boards", boards)
             .put("session", s.id).put("windows", ki.size).put("metrics", JSONObject().put("heldout", cv))
+        if (fp != null) { json.put("fp", fp); cv.put("pos_median_m", fp.getDouble("err")) }
         progress("готово", 1.0)
         val msg = if (roomsOk) "комнаты различаются: ${(acc * 100).toInt()}% (случайно ${(chance * 100).toInt()}%)"
                   else if (rooms.size < 2) "одна комната на плане: показываю квартиру целиком"

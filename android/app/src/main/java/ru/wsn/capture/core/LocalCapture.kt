@@ -146,6 +146,6 @@ class LocalCapture(
 
     companion object {
         val EVENT_KINDS = setOf("session_start", "session_stop", "origin", "router", "room_new", "corner", "room_close",
-            "object", "label", "device", "step")
+            "object", "label", "device", "step", "room_edit")
     }
 }

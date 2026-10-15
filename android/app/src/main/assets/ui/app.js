@@ -8,6 +8,7 @@ import {
 import { resetIds } from './bug.mjs';
 import * as P from './parts.mjs';
 import { WALK } from './walk.mjs';
+import { planSvg, PLAN_CSS, PLAN } from './plan.mjs';
 
 /* ================= оболочка экрана ================= */
 const APP_CSS = `${TOKENS}
@@ -301,7 +302,8 @@ const LOC = { 'кухня': 'на кухне', 'зал': 'в зале', 'спа�
   'гостиная': 'в гостиной', 'кабинет': 'в кабинете', 'ванная': 'в ванной', 'балкон': 'на балконе', 'комната': 'в комнате', 'холл': 'в холле', 'столовая': 'в столовой' };
 const whereTitle = (zone) => { const l = LOC[String(zone).trim().toLowerCase()]; return l ? `Кто-то ${l}` : `Кто-то: ${P.esc(zone)}`; };
 
-const HOME_CSS = `.sec{position:absolute;left:20px;right:20px;display:flex;align-items:center;justify-content:space-between;height:48px}
+const HOME_CSS = `${PLAN_CSS}
+.sec{position:absolute;left:20px;right:20px;display:flex;align-items:center;justify-content:space-between;height:48px}
 .sec b{font-size:17px;font-weight:900}.sec a{font-weight:800;font-size:15px;color:var(--link);height:48px;display:flex;align-items:center}
 .hero .hs{position:absolute;left:50%;top:22px;transform:translateX(-50%)}
 .hero .sticker.r{left:auto!important;right:16px}
@@ -358,8 +360,13 @@ S.home = (st) => {
   const rooms = Array.isArray(h.rooms) && h.rooms.length > 1 ? h.rooms : null;
   const zone = rooms && s !== 'empty' && h.zone && rooms.includes(h.zone) ? h.zone : '';
   const t = zone ? whereTitle(zone) : V.title;
+  const plan = h.plan && Array.isArray(h.plan.rooms) && h.plan.rooms.length ? h.plan : null;
   let hero;
-  if (rooms) {
+  if (plan) {
+    hero = heroCard({ state: V.state, top: HL.heroTop, height: HL.heroH, zone: '', title: t, pill: V.pill, pillIcon: V.icon,
+      art: `<div class="hs" role="button" data-act="openMap">${planSvg({ plan, dot: s !== 'empty' ? h.dot : null, active: zone, tone: V.tone || 'nobody', w: 300, h: 236 })}</div>`,
+      sticker: s === 'moving' ? { text: 'Засёк!', x: 12, y: 18, rot: -7, color: K.tomatoT } : null });
+  } else if (rooms) {
     const vbh = P.houseLayout(rooms).vbh, w = Math.min(304, 252 * 300 / vbh);
     hero = heroCard({ state: V.state, top: HL.heroTop, height: HL.heroH, zone: '', title: t, pill: V.pill, pillIcon: V.icon,
       art: `<div class="hs">${P.house({ names: rooms, width: w, active: zone, tone: V.tone, miniBug: zone ? { pose: V.pose === 'alert' ? 'alert' : 'listen', size: 84 } : null })}</div>`,
@@ -370,6 +377,21 @@ S.home = (st) => {
       sticker: s === 'moving' ? { text: 'Засёк!', x: 246, y: 20, rot: 6, color: K.tomatoT } : null }).replace('class="sticker"', 'class="sticker r"');
   }
   return { ...base, cv: `${hero}${secHtml()}${scale(daySegs(h))}`, flow: `${checklistCard(st)}${evCard}` };
+};
+
+S.map = (st) => {
+  const h = st.home || {}, s = h.state || 'hark', plan = h.plan;
+  const tone = s === 'moving' ? 'move' : s === 'empty' ? 'nobody' : 'quiet';
+  const pill = { moving: ['двигается', K.tomatoT, K.yellow], quiet: ['тихо', K.mintT, K.mintL], empty: ['никого', K.link, K.lilacL] }[s];
+  const zone = Array.isArray(h.rooms) && h.rooms.length > 1 && h.zone ? h.zone : '';
+  return {
+    css: `${PLAN_CSS}.mapc{margin-top:16px;padding:12px;border-radius:28px;background:var(--card);box-shadow:var(--edge),var(--soft);display:flex;justify-content:center}
+.mapc .plan{max-width:100%;height:auto}.leg{display:flex;gap:8px;justify-content:center;margin-top:16px;flex-wrap:wrap}`,
+    head: plainHead('Карта'), start: true,
+    flow: plan ? `<div class="mapc">${planSvg({ plan, dot: s === 'moving' || s === 'quiet' ? h.dot : null, active: zone, tone, w: 326, h: 440 })}</div>
+<div class="leg">${pill ? chip({ label: zone ? `${pill[0]} · ${P.esc(zone)}` : pill[0], dot: pill[1], color: pill[1], bg: pill[2] }) : ''}${h.dot && h.err ? chip({ label: `точность ±${String(Math.round(h.err * 10) / 10).replace('.', ',')} м` }) : ''}</div>`
+      : `<div class="card" style="margin-top:20px;padding:18px;text-align:center;color:var(--ink2);font-weight:800">Плана пока нет</div>`,
+  };
 };
 
 S.events = (st) => {
@@ -445,6 +467,8 @@ function render() {
   if (state.screen !== lastScreen || !r.firstChild) r.replaceChildren(tpl.content);
   else morph(r, tpl.content);
   lastScreen = state.screen;
+  const wl = document.getElementById('wallLen');   // поле длины: показываем новое значение, если его не правят
+  if (wl && document.activeElement !== wl && wl.dataset.v) wl.value = wl.dataset.v;
   fit();
 }
 
@@ -502,6 +526,10 @@ function doAction(el) {
     args = { ssid, password: pwEl ? pwEl.value : '' };
     if (pwEl) { pwEl.value = ''; pwEl.blur(); } // пароль сразу стираем, нигде не храним
   }
+  if (a === 'planSave') {
+    if (PLAN.bad().length) { render(); return; }
+    args = { rooms: PLAN.result() };
+  }
   if (el.dataset.submit && a === 'walkRoom') {
     const r = document.getElementById('room'), name = (r ? r.value : '').trim();
     if (!name) { r?.focus(); return; }
@@ -520,6 +548,7 @@ function onClick(e) {
       if (pw) { pw.type = ui.showPw ? 'text' : 'password'; pw.focus(); }
       u.textContent = ui.showPw ? 'скрыть' : 'показать';
     } else if (u.dataset.ui === 'board') { ui.openMac = ui.openMac === u.dataset.mac ? null : u.dataset.mac; render(); }
+    else if (u.dataset.ui.startsWith('plan') && PLAN.click(u)) render();
     return;
   }
   const el = e.target.closest('[data-act]');
@@ -528,15 +557,19 @@ function onClick(e) {
 
 let longT = 0;
 function onDown(e) {
+  if (PLAN.down(e)) { e.preventDefault(); return; }
   const el = e.target.closest('[data-long]');
   if (el) longT = setTimeout(() => send(el.dataset.long), 800);
 }
-const onUp = () => clearTimeout(longT);
+const onUp = () => { clearTimeout(longT); if (PLAN.up()) render(); };
+function onMove(e) { if (PLAN.move(e)) { e.preventDefault(); render(); } }
+function onChange(e) { if (e.target.id === 'wallLen' && PLAN.setLen(e.target.value)) render(); }
 
 function onKey(e) {
   if (e.key === 'Enter' && e.target.tagName === 'INPUT') {
     const b = root().querySelector('[data-submit]');
     if (e.target.id === 'ssid') document.getElementById('pw')?.focus();
+    else if (e.target.id === 'wallLen') { if (PLAN.setLen(e.target.value)) { e.target.blur(); render(); } }
     else if (e.target.id === 'room') { const g = root().querySelector('[data-act="walkRoom"][data-submit]'); if (g) doAction(g); }
     else if (b) doAction(b);
   }
@@ -560,6 +593,7 @@ function boot() {
   r.addEventListener('click', onClick);
   r.addEventListener('pointerdown', onDown); r.addEventListener('pointerup', onUp); r.addEventListener('pointercancel', onUp); r.addEventListener('pointerleave', onUp);
   r.addEventListener('keydown', onKey);
+  r.addEventListener('pointermove', onMove); r.addEventListener('change', onChange);
   window.addEventListener('resize', fit);
   const q = (window.app && window.app.q) || [];
   window.app = { setState, getState: () => state, send };

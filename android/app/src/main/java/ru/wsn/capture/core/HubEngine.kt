@@ -29,6 +29,8 @@ class HubEngine(
     @Volatile var lastTelemetry: Wsn1.Telemetry? = null
     @Volatile var lastSurvey: Wsn1.Survey? = null
     private var emptySince: Double? = null
+    /** Where the person probably is in the last window (null: the model has no fingerprints). */
+    @Volatile var lastFix: ZoneModel.Fix? = null
 
     private val lock = Any()  // приём (поток сокета), ответ раз в секунду и новая модель — из разных потоков
     private val fresh = HashMap<String, Pair<Long, Long>>()  // плата -> (boot_id, seq) последнего принятого пакета
@@ -89,6 +91,7 @@ class HubEngine(
             ZoneFeatures.linkFeatures(st, quiet[m.links[j]])
         } }
         val v = m.verdict(x)
+        lastFix = if (m.canLocate) m.locate(x) else null
         if (v.emptyP >= ADAPT_EMPTY_P) {
             if (emptySince == null) emptySince = now
             if (now - emptySince!! >= ADAPT_AFTER_S) for (lk in m.links) adapt(lk, windowStats(lk, t1))

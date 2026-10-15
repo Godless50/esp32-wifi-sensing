@@ -3,6 +3,7 @@
 // там же, куда Kotlin пускает луч до пола. Состояние: st.walk (см. CaptureActivity.walkState).
 import { K, EDGE, ICON, RING_TOP, HERO, taskHeader, title, button, textLink, chip, ringTimer, timerPill, soundSticker, bug } from './ui.mjs';
 import * as P from './parts.mjs';
+import { edit, syncEdit, editorSvg, PLAN, fmtM, len } from './plan.mjs';
 
 const act = (html, a, args) => html.replace(/^<(\w+)/, `<$1 data-act="${a}"${args ? ` data-args='${P.esc(JSON.stringify(args))}'` : ''}`);
 const plural = (n, a, b, c) => { const m = n % 10, h = n % 100; return m === 1 && h !== 11 ? a : m >= 2 && m <= 4 && (h < 10 || h >= 20) ? b : c; };
@@ -227,7 +228,47 @@ ${c390(`${ringTimer({ top: RING_TOP, progress: 1, content: `<div class="art" sty
   };
 };
 
+/* ---------- план перед сохранением: стены можно поправить ---------- */
+const ED_CSS = `.edw{display:flex;justify-content:center;margin-top:4px}
+.edw .ed{max-width:100%;height:auto}
+.pt1{text-align:center;margin:8px 0 2px}
+.lenrow{display:flex;align-items:center;gap:10px;margin:0 4px 6px}
+.lenrow .pm{flex:none;width:56px;height:56px;border-radius:18px;background:var(--lilacL);display:grid;place-items:center;font:900 26px Nunito,sans-serif;color:var(--link);box-shadow:0 3px 0 ${EDGE.lilac}}
+.lenrow .in{flex:1;min-width:0;height:56px;border-radius:18px;background:var(--bg);box-shadow:inset 0 0 0 2px ${EDGE.lilac};display:flex;align-items:center;padding:0 16px}
+.lenrow input{flex:1;min-width:0;border:0;background:transparent;font:800 22px Unbounded,sans-serif;color:var(--ink);outline:none;text-align:center}
+.lenrow em{font-style:normal;font-weight:900;color:var(--ink2)}
+.sheet .x{width:40px;height:40px;border-radius:14px;background:var(--mint);display:grid;place-items:center}
+.ed-r{margin:10px 0 0;justify-content:center}.ed-r .rs{flex:none;-webkit-mask-image:none;mask-image:none;flex-wrap:wrap;justify-content:center}
+.perr{text-align:center;font-weight:800;color:${K.tomatoT};margin:0 0 10px}
+.lk .link{position:relative;left:auto;right:auto;bottom:auto!important;top:auto!important}
+.lks{display:flex;justify-content:center;gap:4px}.lks .lk{border-top:0!important}.lks .link{padding:0 10px}`;
+const walk_plan = (st) => {
+  const w = st.walk || {};
+  syncEdit(w.plan);
+  const sel = edit.sel && edit.rooms[edit.sel.r];
+  const tl = (label, ui, icon) => `<div class="lk">${textLink({ label, icon }).replace('class="link"', `data-ui="${ui}" class="link"`)}</div>`;
+  const ortho = () => `<div class="lks">${tl('Выровнять', 'planOrtho', ICON.check({ s: 20, c: K.link, w: 2.8 }))}${tl('Как было', 'planReset', ICON.retry({ s: 20, c: K.link, w: 2.6 }))}</div>`;
+  let bot;
+  if (sel) {
+    const i = edit.sel.i, L = len(sel.poly[i], sel.poly[(i + 1) % sel.poly.length]);
+    bot = `<div class="sheet"><div class="row"><b>${P.esc(sel.name)} <span>· стена ${i + 1}</span></b><span class="x" role="button" data-ui="planDone">${ICON.check({ s: 20, c: '#fff', w: 3.4 })}</span></div>
+<div class="lenrow"><span class="pm" role="button" data-ui="planMinus">−</span><span class="in"><input id="wallLen" inputmode="decimal" enterkeyhint="done" autocomplete="off" data-v="${L.toFixed(2).replace('.', ',')}" value="${L.toFixed(2).replace('.', ',')}"><em>м</em></span><span class="pm" role="button" data-ui="planPlus">+</span></div>
+${ortho()}</div>`;
+  } else {
+    const bad = PLAN.bad();
+    bot = `${bad.length ? `<div class="perr">«${P.esc(bad[0])}» слишком маленькая</div>` : ''}${act(button({ label: 'Сохранить план', arrow: true }), 'planSave')}<div style="margin-top:6px">${ortho()}</div>`;
+  }
+  return {
+    bg: K.lilacL, css: WALK_CSS + ED_CSS, head: head(w), start: true,
+    flow: `<h1 class="h1 pt1">Проверь план</h1>
+<div class="rooms ed-r"><div class="rs">${edit.rooms.map((r, i) => `<span class="hit" role="button" data-ui="planRoom" data-r="${i}">${i === edit.cur
+  ? `<span class="chip now"><i></i>${P.esc(r.name)}</span>` : chip({ label: P.esc(r.name), dot: K.lilac })}</span>`).join('')}</div></div>
+<div class="edw">${editorSvg()}</div>`,
+    bot,
+  };
+};
+
 /* ---------- ждём связь с центром ---------- */
 const walk_wait = (st) => cam(st.walk || {}, { rooms: false, sheet: `<div class="find"><i>${P.miniRing()}</i><b>Секунду…</b></div>` });
 
-export const WALK = { walk_find, walk_room, walk_mark, walk_task, walk_pause, walk_out, walk_back, walk_wait };
+export const WALK = { walk_find, walk_room, walk_mark, walk_task, walk_pause, walk_out, walk_back, walk_wait, walk_plan };

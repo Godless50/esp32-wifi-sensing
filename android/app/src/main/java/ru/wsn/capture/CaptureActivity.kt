@@ -49,7 +49,7 @@ import kotlin.math.roundToInt
  * the guided scenario -> "Сохранить". Poses (30 Hz) and events go to /ws/capture (CaptureClient).
  */
 class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
-    private enum class Phase { START, OUT1, DEVICES, ROOMS, SCENARIO, DONE }   // OUT1 — «все за дверь» в начале (телефон-центр)
+    private enum class Phase { START, OUT1, DEVICES, ROOMS, PLAN, SCENARIO, DONE }   // OUT1 — «все за дверь» в начале (телефон-центр)
 
     private val main = Handler(Looper.getMainLooper())
     private lateinit var glView: GLSurfaceView
@@ -94,6 +94,8 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var toastUntil = 0L
     private var closing = false      // запись закрыта, экран уходит: ничего не начинать заново
     private var startedOnce = false  // сам начинаем запись один раз; дальше — только по «Уходим»
+    /** Corners of each room on the floor (x, -z of AR, metres) — for the plan check before the scenario. */
+    private val roomPts = LinkedHashMap<String, MutableList<DoubleArray>>()
 
     private fun nowMs(): Double = SystemClock.elapsedRealtimeNanos() / 1e6
 
@@ -305,6 +307,7 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         if (n == roomOpen) { log("«$n» уже открыта — отмечайте углы.", true); return }
         if (roomOpen != null) closeRoom()
         client.event("room_new", JSONObject().put("name", n)); roomOpen = n; roomCorners = 0; lastCorner = null
+        roomPts[n] = mutableListOf()
         log("«$n»: наведите кружок на угол у пола и нажмите «Угол» — все углы по кругу.")
         rebuildPanel()
     }
@@ -323,6 +326,7 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         lastCorner = xz
         client.event("corner", JSONObject().put("p", JSONArray(h.map { it.toDouble() })).put("source", "hit"))
         roomCorners++
+        roomOpen?.let { roomPts.getOrPut(it) { mutableListOf() }.add(doubleArrayOf(h[0].toDouble(), -h[2].toDouble())) }
         log("Угол $roomCorners.")
         rebuildPanel()
     }
@@ -474,7 +478,7 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         panel.removeAllViews()
         stepText = null; stepInfo = null
         when (phase) {
-            Phase.OUT1 -> {}
+            Phase.OUT1, Phase.PLAN -> {}
             Phase.START -> {
                 panel.addView(hint("1. Начните запись. Пока она идёт, в квартире должны быть только вы."))
                 panel.addView(row(btn("Начать запись", 1) { startRecording() }, btn("Закрыть") { finish() }))
@@ -647,8 +651,10 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             }
             "walkScenario" -> {
                 if (roomOpen != null && roomCorners == 0) roomOpen = null   // открыли «+» и передумали
-                if (roomOpen == null || roomCorners >= 3) { naming = false; startScenario() }
+                if (roomOpen != null && roomCorners >= 3) closeRoom()
+                if (roomOpen == null && rooms.isNotEmpty()) { naming = false; setPhase(Phase.PLAN) }
             }
+            "planSave" -> savePlan(args.optJSONArray("rooms"))
             "walkPause" -> r?.paused = true
             "walkResume" -> { exitSheet = false; r?.paused = false }
             "walkRedo" -> { r?.paused = false; r?.again() }
@@ -661,12 +667,26 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             "walkSave" -> finishWalk(true)
             "walkBack" -> when {
                 phase == Phase.DONE -> {}
+                phase == Phase.PLAN -> { naming = true; setPhase(Phase.ROOMS) }   // ещё комната
                 phase == Phase.SCENARIO && r != null && !r.waiting && r.current?.activity != "empty" -> r.paused = true
                 phase == Phase.ROOMS && naming && (rooms.isNotEmpty() || roomOpen != null) && roomOpen != null -> naming = false
                 else -> exitSheet = !exitSheet
             }
         }
         pushHud()
+    }
+
+    /** План проверен (стены, может быть, поправлены руками): правки — в запись событием room_edit, дальше сценарий. */
+    private fun savePlan(arr: JSONArray?) {
+        if (phase != Phase.PLAN) return
+        if (arr != null) for (i in 0 until arr.length()) {
+            val r = arr.optJSONObject(i) ?: continue
+            val name = r.optString("name"); val poly = r.optJSONArray("poly") ?: continue
+            if (name !in rooms || poly.length() < 3) continue
+            client.event("room_edit", JSONObject().put("name", name).put("poly", poly))
+            roomPts[name] = (0 until poly.length()).map { k -> poly.getJSONArray(k).let { doubleArrayOf(it.getDouble(0), it.getDouble(1)) } }.toMutableList()
+        }
+        startScenario()
     }
 
     /** Конец записи: полный обход — приложение начнёт учиться; брошенный — запись остаётся, обход начинают заново. */
@@ -728,6 +748,17 @@ class CaptureActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                     w.put("corners", roomCorners)
                     w.put("aim", when { tracking != TrackingState.TRACKING -> "lost"; floorY == null -> "nofloor"; hitPos == null -> "far"; else -> "ok" })
                 }
+            }
+            Phase.PLAN -> {
+                part = 0.3
+                screen = "walk_plan"
+                w.put("plan", JSONArray().apply {
+                    for (n in rooms) {
+                        val poly = ru.wsn.capture.core.TrainPipeline.normalizeCorners(roomPts[n] ?: continue)
+                        if (poly.size < 3) continue
+                        put(JSONObject().put("name", n).put("poly", JSONArray().apply { for (p in poly) put(JSONArray().put(p[0]).put(p[1])) }))
+                    }
+                })
             }
             Phase.SCENARIO -> {
                 val st = r?.current

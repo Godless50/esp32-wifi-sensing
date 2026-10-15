@@ -32,6 +32,15 @@ class ZoneModel private constructor(
     private val mu: Array<DoubleArray>,
     private val sd: Array<DoubleArray>,
     private val nets: List<Net>,
+    /** Fingerprints of the walk: the first net's last hidden layer of each labelled window and where the phone
+     *  (the person) was then. A live window is placed by its nearest fingerprints (kNN). Absent in old models. */
+    private val fpE: Array<DoubleArray> = emptyArray(),
+    private val fpP: Array<DoubleArray> = emptyArray(),
+    /** Median error of that placement, metres, checked on the walk without the 30 s around each window. */
+    val fpErr: Double = Double.NaN,
+    /** 75th percentile of that error: the halo around the dot ("usually within"). */
+    val fpErr75: Double = Double.NaN,
+    private val fpK: Int = 7,
 ) {
     private class Net(
         val w1: Array<DoubleArray>, val b1: DoubleArray, val w2: Array<DoubleArray>, val b2: DoubleArray,
@@ -95,6 +104,22 @@ class ZoneModel private constructor(
         return pz to pm
     }
 
+    /** The first net's last hidden layer for each window: the space the fingerprints live in. */
+    fun embed(x: Array<Array<DoubleArray>>): Array<DoubleArray> {
+        val net = nets[0]
+        return Array(x.size) { n -> relu(matvec(net.w2, relu(matvec(net.w1, standardizeRow(x[n]), net.b1)), net.b2)) }
+    }
+
+    val canLocate: Boolean get() = fpE.isNotEmpty()
+
+    /** Where the person probably is: weighted mean of the K nearest fingerprints, and their spread (metres). */
+    data class Fix(val x: Double, val y: Double, val spread: Double)
+
+    fun locate(x: Array<Array<DoubleArray>>, k: Int = fpK): Fix? {
+        if (fpE.isEmpty()) return null
+        return nearest(embed(x)[0], fpE, fpP, k, skip = null)
+    }
+
     /** Room with the highest probability given somebody is home, its probability, and the empty probability. */
     data class Verdict(val zone: String, val zoneP: Double, val emptyP: Double, val movingP: Double,
                        val probs: Map<String, Double>, val linksLive: Int)
@@ -117,6 +142,26 @@ class ZoneModel private constructor(
             Array(o.length()) { i -> o.getJSONArray(i).let { r -> DoubleArray(r.length()) { r.getDouble(it) } } }
         private fun vec(o: org.json.JSONArray) = DoubleArray(o.length()) { o.getDouble(it) }
 
+        /** kNN in embedding space; skip(i) excludes candidates (the honest check leaves out time neighbours). */
+        fun nearest(e: DoubleArray, fpE: Array<DoubleArray>, fpP: Array<DoubleArray>, k: Int, skip: ((Int) -> Boolean)?): Fix? {
+            val d = ArrayList<Pair<Double, Int>>(fpE.size)
+            for (i in fpE.indices) {
+                if (skip != null && skip(i)) continue
+                var s = 0.0; val f = fpE[i]
+                for (j in e.indices) { val q = e[j] - f[j]; s += q * q }
+                d.add(s to i)
+            }
+            if (d.isEmpty()) return null
+            d.sortBy { it.first }
+            val top = d.take(k)
+            var w = 0.0; var x = 0.0; var y = 0.0
+            for ((s, i) in top) { val wi = 1.0 / (kotlin.math.sqrt(s) + 1e-3); w += wi; x += wi * fpP[i][0]; y += wi * fpP[i][1] }
+            x /= w; y /= w
+            var v = 0.0
+            for ((s, i) in top) { val wi = 1.0 / (kotlin.math.sqrt(s) + 1e-3); v += wi * ((fpP[i][0] - x) * (fpP[i][0] - x) + (fpP[i][1] - y) * (fpP[i][1] - y)) }
+            return Fix(x, y, kotlin.math.sqrt(v / w))
+        }
+
         fun fromJson(text: String): ZoneModel {
             val j = JSONObject(text)
             val links = j.getJSONArray("links").let { a -> List(a.length()) { a.getString(it) } }
@@ -129,8 +174,14 @@ class ZoneModel private constructor(
                         mat(n.getJSONArray("Wm")), vec(n.getJSONArray("bm")))
                 }
             }
+            val fp = j.optJSONObject("fp")
             return ZoneModel(j.optInt("version", 0), links, zones,
-                mat(j.getJSONArray("mu")), mat(j.getJSONArray("sd")), nets)
+                mat(j.getJSONArray("mu")), mat(j.getJSONArray("sd")), nets,
+                fp?.optJSONArray("e")?.let { mat(it) } ?: emptyArray(),
+                fp?.optJSONArray("p")?.let { mat(it) } ?: emptyArray(),
+                fp?.optDouble("err", Double.NaN) ?: Double.NaN,
+                fp?.optDouble("err75", Double.NaN) ?: Double.NaN,
+                fp?.optInt("k", 7) ?: 7)
         }
     }
 }

@@ -89,6 +89,9 @@ class TrainPipelineTest {
         val j = JSONObject(res.modelJson)
         assertTrue(j.getBoolean("rooms_ok"))
         assertEquals(3, j.getJSONObject("quiet").length())
+        // точка на плане: отпечатки есть, честная ошибка — в пределах комнаты (здесь линии знают только комнату)
+        assertTrue(model.canLocate)
+        assertTrue(res.metrics.toString(), model.fpErr < 2.5)
     }
 
     @Test fun linksBlindToRoomsGiveTheFlatAsOneZone() {
